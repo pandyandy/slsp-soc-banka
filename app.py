@@ -18,6 +18,60 @@ st.set_page_config(
     page_icon=mini_logo, 
     layout="wide")
 
+# Create fake data for pre-filling
+fake_data = {
+    "CID001": {
+        "meno_priezvisko": "Ján Novák",
+        "datum_narodenia": date(1985, 3, 15),
+        "pocet_clenov_domacnosti": 4,
+        "typ_bydliska": ["Byt", "Nájom"],
+        "domacnost_poznamky": "4-členná rodina s dvoma deťmi",
+        "pribeh": "Prišiel som o prácu počas pandémie. Manželka je na materskej dovolenke. Finančné problémy trvajú už 8 mesiacov.",
+        "riesenie": "Potrebujeme pomoc s refinancovaním dlhov a hľadaním novej práce. Vedeli by sme splácať max 300€ mesačne."
+    },
+    "CID002": {
+        "meno_priezvisko": "Mária Svobodová", 
+        "datum_narodenia": date(1978, 11, 22),
+        "pocet_clenov_domacnosti": 2,
+        "typ_bydliska": ["Rodinný dom", "Ve vlastníctve"],
+        "domacnost_poznamky": "Žijem s dcérou (15 rokov)",
+        "pribeh": "Po rozvode som zostala sama s dcérou. Bývalý manžel neplatí výživné. Mám problém splácať hypotéku.",
+        "riesenie": "Potrebujem pomoc s vymáhaním výživného a reštrukturalizáciou hypotéky. Vedela by som platiť 250€ mesačne."
+    },
+    "CID003": {
+        "meno_priezvisko": "Peter Kováč",
+        "datum_narodenia": date(1992, 7, 8), 
+        "pocet_clenov_domacnosti": 1,
+        "typ_bydliska": ["Byt", "Nájom"],
+        "domacnost_poznamky": "Žijem sám",
+        "pribeh": "Študoval som na vysokej škole a nahromadil dlhy. Po ukončení štúdia nemôžem nájsť prácu v odbore.",
+        "riesenie": "Hľadám pomoc s konsolidáciou študentských pôžičiek. Mohol by som splácať 150€ mesačne po nájdení práce."
+    }
+}
+
+# Function to load fake data
+def load_fake_data(cid):
+    if cid in fake_data:
+        data = fake_data[cid]
+        # Set session state values
+        for key, value in data.items():
+            st.session_state[key] = value
+
+# Function to clear form data
+def clear_form_data():
+    keys_to_clear = [
+        "meno_priezvisko", "datum_narodenia", "pocet_clenov_domacnosti", 
+        "typ_bydliska", "domacnost_poznamky", "pribeh", "riesenie"
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+
+# Initialize previous CID tracking
+if "previous_cid" not in st.session_state:
+    st.session_state.previous_cid = ""
+
+
 def background_color(background_color, text_color, header_text, text=None):
      content = f'<div style="font-size:20px;margin:0px 0;">{header_text}</div>'
      if text:
@@ -51,13 +105,27 @@ st.markdown(f"""
 # basic info 
 col1, col2 = st.columns(2)
 with col1: 
+
+    # CID selectbox with automatic data loading
+    selected_cid = st.selectbox(
+        "CID klienta:",
+        options=[""] + list(fake_data.keys()),
+        key="cid",
+        help="Údaje sa načítajú automaticky po výbere CID"
+    )
+    
+    # Auto-load data when CID changes
+    if selected_cid != st.session_state.previous_cid:
+        if selected_cid and selected_cid != "":
+            load_fake_data(selected_cid)
+        else:
+            # Clear data when empty CID is selected
+            clear_form_data()
+        st.session_state.previous_cid = selected_cid
+    
     st.text_input(
         "Meno a priezvisko klienta:",
         key="meno_priezvisko"
-    )
-    st.text_input(
-        "CID klienta:",
-        key="cid"
     )
     st.date_input(
         "Dátum narodenia:",
@@ -726,7 +794,4 @@ with col:
         with st.spinner("Ukládám...", show_time=True):
             time.sleep(3)
         st.success("Data boli úspešne uložené!")
-
-
-
 
