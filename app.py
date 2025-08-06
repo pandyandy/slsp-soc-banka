@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import base64
 import os
+import time
+
 from PIL import Image
-from pathlib import Path
 from datetime import date
 
 
@@ -718,7 +719,13 @@ with st.container(border=True):
     )
     
     
-
+_, _, _, col = st.columns(4)
+with col:
+    save = st.button("Uložiť", use_container_width=True, key="uloz")
+    if save:
+        with st.spinner("Ukládám...", show_time=True):
+            time.sleep(3)
+        st.success("Data boli úspešne uložené!")
 
 
 
