@@ -7,14 +7,6 @@ import time
 from PIL import Image
 from datetime import date
 
-# Optional: richer grid editing if installed
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-except Exception:  # pragma: no cover
-    AgGrid = None
-    GridOptionsBuilder = None
-    GridUpdateMode = None
-
 
 mini_logo_path = os.path.join(os.path.dirname(__file__), "static", "logo_mini.png")
 logo_path = os.path.join(os.path.dirname(__file__), "static", "logo.png")
@@ -679,13 +671,18 @@ with st.container(border=True):
     # Initialize executions storage in session state
     if "exekucie_df" not in st.session_state:
         st.session_state.exekucie_df = pd.DataFrame({
+            "Vybrať": pd.Series(dtype="bool"),
             "Číslo": pd.Series(dtype="string"),
             "Meno exekútora": pd.Series(dtype="string"),
             "Pre koho exekútor vymáha dlh?": pd.Series(dtype="string"),
-            "Od kedy mám exekúciu?": pd.Series(dtype="string"),  # keep as text for simplicity
+            "Od kedy mám exekúciu?": pd.Series(dtype="string"),
             "Aktuálna výška exekúcie?": pd.Series(dtype="float"),
             "Akou sumou ju mesačne splácam?": pd.Series(dtype="float"),
         })
+
+    # Ensure selection column exists for older sessions
+    if "Vybrať" not in st.session_state.exekucie_df.columns:
+        st.session_state.exekucie_df.insert(0, "Vybrať", False)
 
     def _renumber_exekucie_rows() -> None:
         if not st.session_state.exekucie_df.empty:
@@ -696,6 +693,7 @@ with st.container(border=True):
     with ctrl_ex1:
         if st.button("Pridať exekúciu", use_container_width=True):
             new_row = {
+                "Vybrať": False,
                 "Číslo": "",
                 "Meno exekútora": "",
                 "Pre koho exekútor vymáha dlh?": "",
@@ -707,70 +705,53 @@ with st.container(border=True):
             _renumber_exekucie_rows()
             st.rerun()
 
-    selected_key = None
-
-    if AgGrid is not None:
-        # Configure and render AgGrid
-        gob = GridOptionsBuilder.from_dataframe(st.session_state.exekucie_df)
-        gob.configure_default_column(editable=True, resizable=True)
-        gob.configure_column("Číslo", editable=False, width=110)
-        gob.configure_column("Aktuálna výška exekúcie?", type=["numericColumn"], valueParser="Number(value)")
-        gob.configure_column("Akou sumou ju mesačne splácam?", type=["numericColumn"], valueParser="Number(value)")
-        gob.configure_selection("single", use_checkbox=True)
-        grid = AgGrid(
-            st.session_state.exekucie_df,
-            gridOptions=gob.build(),
-            update_mode=GridUpdateMode.VALUE_CHANGED,
-            height=260,
-            fit_columns_on_grid_load=True,
-            allow_unsafe_jscode=True,
-            theme="balham",
-        )
-        # Persist edits from grid
-        if grid and "data" in grid:
-            st.session_state.exekucie_df = pd.DataFrame(grid["data"])
-            _renumber_exekucie_rows()
-        # Determine selected row by key (Číslo)
-        selected_rows = grid.get("selected_rows", []) if grid else []
-        if selected_rows:
-            selected_key = selected_rows[0].get("Číslo")
-    else:
-        # Fallback to data_editor if st_aggrid is not installed
-        exekucie_column_config = {
-            "Číslo": st.column_config.TextColumn("Číslo", disabled=True),
-            "Meno exekútora": st.column_config.TextColumn("Meno exekútora", max_chars=200),
-            "Pre koho exekútor vymáha dlh?": st.column_config.TextColumn("Pre koho exekútor vymáha dlh?", max_chars=200),
-            "Od kedy mám exekúciu?": st.column_config.TextColumn("Od kedy mám exekúciu?", max_chars=100),
-            "Aktuálna výška exekúcie?": st.column_config.NumberColumn("Aktuálna výška exekúcie?", min_value=0, step=0.01, format="%.2f €"),
-            "Akou sumou ju mesačne splácam?": st.column_config.NumberColumn("Akou sumou ju mesačne splácam?", min_value=0, step=0.01, format="%.2f €"),
-        }
-        edited = st.data_editor(
-            st.session_state.exekucie_df,
-            column_config=exekucie_column_config,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            key="exekucie_data",
-            row_height=40,
-        )
-        st.session_state.exekucie_df = edited
-        _renumber_exekucie_rows()
-
     with ctrl_ex2:
-        disabled = selected_key is None and not (AgGrid is None and not st.session_state.exekucie_df.empty)
-        if st.button("Zmazať vybranú", disabled=disabled, use_container_width=True):
-            if AgGrid is not None and selected_key is not None:
-                df = st.session_state.exekucie_df
-                drop_idx = df.index[df["Číslo"] == selected_key].tolist()
-                if drop_idx:
-                    st.session_state.exekucie_df = df.drop(index=drop_idx[0]).reset_index(drop=True)
-                    _renumber_exekucie_rows()
-                    st.rerun()
-            elif AgGrid is None and not st.session_state.exekucie_df.empty:
-                # In fallback, delete the last row (no selection)
-                st.session_state.exekucie_df = st.session_state.exekucie_df.iloc[:-1].reset_index(drop=True)
+        if st.button("Zmazať vybranú", use_container_width=True):
+            df = st.session_state.exekucie_df
+            selected_idxs = df.index[df.get("Vybrať", False) == True].tolist()
+            if len(selected_idxs) == 0:
+                st.warning("Označte jeden riadok v tabuľke na zmazanie (stĺpec 'Vybrať').")
+            elif len(selected_idxs) > 1:
+                st.warning("Označte iba jeden riadok na zmazanie.")
+            else:
+                st.session_state.exekucie_df = df.drop(index=selected_idxs[0]).reset_index(drop=True)
                 _renumber_exekucie_rows()
                 st.rerun()
+
+    # Editor for executions
+    exekucie_column_config = {
+        "Vybrať": st.column_config.CheckboxColumn("Vybrať"),
+        "Číslo": st.column_config.TextColumn("Číslo", disabled=True),
+        "Meno exekútora": st.column_config.TextColumn("Meno exekútora", max_chars=200),
+        "Pre koho exekútor vymáha dlh?": st.column_config.TextColumn("Pre koho exekútor vymáha dlh?", max_chars=200),
+        "Od kedy mám exekúciu?": st.column_config.TextColumn("Od kedy mám exekúciu?", max_chars=100),
+        "Aktuálna výška exekúcie?": st.column_config.NumberColumn("Aktuálna výška exekúcie?", min_value=0, step=0.01, format="%.2f €"),
+        "Akou sumou ju mesačne splácam?": st.column_config.NumberColumn("Akou sumou ju mesačne splácam?", min_value=0, step=0.01, format="%.2f €"),
+    }
+
+    # Order columns in the editor
+    cols_order = [
+        "Vybrať",
+        "Číslo",
+        "Meno exekútora",
+        "Pre koho exekútor vymáha dlh?",
+        "Od kedy mám exekúciu?",
+        "Aktuálna výška exekúcie?",
+        "Akou sumou ju mesačne splácam?",
+    ]
+    df_for_edit = st.session_state.exekucie_df.reindex(columns=cols_order)
+
+    edited = st.data_editor(
+        df_for_edit,
+        column_config=exekucie_column_config,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="exekucie_data",
+        row_height=40,
+    )
+    st.session_state.exekucie_df = edited
+    _renumber_exekucie_rows()
 
     # Calculate totals for executions
     df_ex = st.session_state.exekucie_df.copy()
