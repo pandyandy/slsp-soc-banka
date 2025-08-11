@@ -7,6 +7,14 @@ import time
 from PIL import Image
 from datetime import date
 
+# Optional: richer grid editing if installed
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+except Exception:  # pragma: no cover
+    AgGrid = None
+    GridOptionsBuilder = None
+    GridUpdateMode = None
+
 
 mini_logo_path = os.path.join(os.path.dirname(__file__), "static", "logo_mini.png")
 logo_path = os.path.join(os.path.dirname(__file__), "static", "logo.png")
@@ -505,89 +513,156 @@ with st.container(border=True):
     
     # First table - ÚVERY (Loans)
     st.markdown("**ÚVERY**")
-    
-    # Create predefined rows for different bank types
+
+    # Define columns mapping (reuse existing headers)
     bank_types = [
         "banka",
-        "nebankovka", 
+        "nebankovka",
         "súkromné",
         "pôžička od rodiny/priateľov",
         "iné"
     ]
-    
-    uvery_data = pd.DataFrame({
-        debts_columns["kde_som_si_pozical"]: bank_types,
-        debts_columns["na_aky_ucel"]: [""] * 5,
-        debts_columns["kedy_som_si_pozical"]: [""] * 5,
-        debts_columns["urokova_sadzba"]: [0.0] * 5,
-        debts_columns["kolko_som_si_pozical"]: [0.0] * 5,
-        debts_columns["kolko_este_dlzim"]: [0.0] * 5,
-        debts_columns["aku_mam_mesacnu_splatku"]: [0.0] * 5
-    })
-    
-    # Configure column types for loans table
-    uvery_column_config = {
-        debts_columns["kde_som_si_pozical"]: st.column_config.SelectboxColumn(
-            "Kde som si požičal?",
-            help="Typ inštitúcie",
-            options=bank_types,
-            required=False
-        ),
-        debts_columns["na_aky_ucel"]: st.column_config.TextColumn(
-            "Na aký účel?",
-            help="Účel pôžičky",
-            max_chars=200,
-        ),
-        debts_columns["kedy_som_si_pozical"]: st.column_config.TextColumn(
-            "Kedy som si požičal?",
-            help="Dátum alebo obdobie",
-            max_chars=100,
-        ),
-        debts_columns["urokova_sadzba"]: st.column_config.NumberColumn(
-            "Úroková sadzba?",
-            help="Úroková sadzba v %",
-            min_value=0,
-            step=0.1,
-            format="%.1f %%"
-        ),
-        debts_columns["kolko_som_si_pozical"]: st.column_config.NumberColumn(
-            "Koľko som si požičal?",
-            help="Pôvodná suma v eurách",
-            min_value=0,
-            step=0.01,
-            format="%.2f €"
-        ),
-        debts_columns["kolko_este_dlzim"]: st.column_config.NumberColumn(
-            "Koľko ešte dlžím?",
-            help="Zostávajúca suma v eurách",
-            min_value=0,
-            step=0.01,
-            format="%.2f €"
-        ),
-        debts_columns["aku_mam_mesacnu_splatku"]: st.column_config.NumberColumn(
-            "Akú mám mesačnú splátku?",
-            help="Mesačná splátka v eurách",
-            min_value=0,
-            step=0.01,
-            format="%.2f €"
-        )
+    bank_type_options = ["— Vyberte —"] + bank_types
+
+    uvery_columns = {
+        "kde_som_si_pozical": debts_columns["kde_som_si_pozical"],
+        "na_aky_ucel": debts_columns["na_aky_ucel"],
+        "kedy_som_si_pozical": debts_columns["kedy_som_si_pozical"],
+        "urokova_sadzba": debts_columns["urokova_sadzba"],
+        "kolko_som_si_pozical": debts_columns["kolko_som_si_pozical"],
+        "kolko_este_dlzim": debts_columns["kolko_este_dlzim"],
+        "aku_mam_mesacnu_splatku": debts_columns["aku_mam_mesacnu_splatku"],
     }
-    
-    edited_uvery = st.data_editor(
-        uvery_data,
-        column_config=uvery_column_config,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="uvery_data",
-        row_height=40
-    )
-    
-    # Calculate totals for loans
-    loan_total_borrowed = edited_uvery[debts_columns["kolko_som_si_pozical"]].sum()
-    loan_total_remaining = edited_uvery[debts_columns["kolko_este_dlzim"]].sum()
-    loan_total_monthly = edited_uvery[debts_columns["aku_mam_mesacnu_splatku"]].sum()
-    
+
+    # Initialize loans storage in session state
+    if "uvery_df" not in st.session_state:
+        st.session_state.uvery_df = pd.DataFrame({
+            uvery_columns["kde_som_si_pozical"]: pd.Series(dtype="string"),
+            uvery_columns["na_aky_ucel"]: pd.Series(dtype="string"),
+            uvery_columns["kedy_som_si_pozical"]: pd.Series(dtype="object"),  # store date objects
+            uvery_columns["urokova_sadzba"]: pd.Series(dtype="float"),
+            uvery_columns["kolko_som_si_pozical"]: pd.Series(dtype="float"),
+            uvery_columns["kolko_este_dlzim"]: pd.Series(dtype="float"),
+            uvery_columns["aku_mam_mesacnu_splatku"]: pd.Series(dtype="float"),
+        })
+
+    uvery_df = st.session_state.uvery_df
+
+    # Controls row: Add / Edit / Delete via popovers and buttons
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 1], vertical_alignment="bottom")
+
+    # Add new loan via popover form
+    with ctrl_col1:
+        with st.popover("Pridať úver", use_container_width=True):
+            with st.form("uver_add_form", clear_on_submit=True):
+                add_kde = st.selectbox(uvery_columns["kde_som_si_pozical"], options=bank_type_options, index=0)
+                add_ucel = st.text_input(uvery_columns["na_aky_ucel"], value="")
+                add_kedy = st.date_input(uvery_columns["kedy_som_si_pozical"], value=date.today(), format="DD.MM.YYYY")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    add_urok = st.number_input(uvery_columns["urokova_sadzba"], min_value=0.0, max_value=100.0, step=0.1, value=0.0, format="%.1f")
+                    add_pozical = st.number_input(uvery_columns["kolko_som_si_pozical"], min_value=0.0, step=0.01, value=0.0, format="%.2f")
+                with col_b:
+                    add_dlzim = st.number_input(uvery_columns["kolko_este_dlzim"], min_value=0.0, step=0.01, value=0.0, format="%.2f")
+                    add_splatka = st.number_input(uvery_columns["aku_mam_mesacnu_splatku"], min_value=0.0, step=0.01, value=0.0, format="%.2f")
+                submitted_add = st.form_submit_button("Uložiť úver", type="primary")
+            if submitted_add:
+                new_row = {
+                    uvery_columns["kde_som_si_pozical"]: (add_kde if add_kde in bank_types else ""),
+                    uvery_columns["na_aky_ucel"]: add_ucel,
+                    uvery_columns["kedy_som_si_pozical"]: add_kedy,
+                    uvery_columns["urokova_sadzba"]: float(add_urok) if add_urok is not None else 0.0,
+                    uvery_columns["kolko_som_si_pozical"]: float(add_pozical) if add_pozical is not None else 0.0,
+                    uvery_columns["kolko_este_dlzim"]: float(add_dlzim) if add_dlzim is not None else 0.0,
+                    uvery_columns["aku_mam_mesacnu_splatku"]: float(add_splatka) if add_splatka is not None else 0.0,
+                }
+                st.session_state.uvery_df = pd.concat([st.session_state.uvery_df, pd.DataFrame([new_row])], ignore_index=True)
+                st.success("Úver pridaný")
+                st.rerun()
+
+    # Select a row to edit/delete
+    selected_row_index = None
+    if not uvery_df.empty:
+        with ctrl_col2:
+            options = list(range(len(uvery_df)))
+            def _format_row(i: int) -> str:
+                try:
+                    typ = uvery_df.iloc[i][uvery_columns["kde_som_si_pozical"]] or ""
+                    ucel = uvery_df.iloc[i][uvery_columns["na_aky_ucel"]] or ""
+                    return f"{i+1}. {typ} – {ucel}"
+                except Exception:
+                    return f"{i+1}. záznam"
+            selected_row_index = st.selectbox(
+                "Vybrať úver",
+                options=options,
+                index=0,
+                format_func=_format_row,
+                key="uvery_edit_select",
+            )
+
+        # Edit selected via popover form
+        with ctrl_col3:
+            with st.popover("Upraviť vybraný", use_container_width=True):
+                if selected_row_index is not None and 0 <= selected_row_index < len(uvery_df):
+                    row = uvery_df.iloc[selected_row_index]
+                    with st.form("uver_edit_form"):
+                        current_typ = row[uvery_columns["kde_som_si_pozical"]]
+                        default_index = bank_types.index(current_typ) + 1 if current_typ in bank_types else 0
+                        edit_kde = st.selectbox(uvery_columns["kde_som_si_pozical"], options=bank_type_options, index=default_index, key=f"edit_kde_{selected_row_index}")
+                        edit_ucel = st.text_input(uvery_columns["na_aky_ucel"], value=str(row[uvery_columns["na_aky_ucel"]] or ""), key=f"edit_ucel_{selected_row_index}")
+                        # Default date
+                        default_date = row[uvery_columns["kedy_som_si_pozical"]]
+                        if pd.isna(default_date) or default_date is None or default_date == "":
+                            default_date = date.today()
+                        edit_kedy = st.date_input(uvery_columns["kedy_som_si_pozical"], value=default_date, format="DD.MM.YYYY", key=f"edit_kedy_{selected_row_index}")
+                        col_e1, col_e2 = st.columns(2)
+                        with col_e1:
+                            edit_urok = st.number_input(uvery_columns["urokova_sadzba"], min_value=0.0, max_value=100.0, step=0.1, value=float(row[uvery_columns["urokova_sadzba"]] or 0.0), format="%.1f", key=f"edit_urok_{selected_row_index}")
+                            edit_pozical = st.number_input(uvery_columns["kolko_som_si_pozical"], min_value=0.0, step=0.01, value=float(row[uvery_columns["kolko_som_si_pozical"]] or 0.0), format="%.2f", key=f"edit_pozical_{selected_row_index}")
+                        with col_e2:
+                            edit_dlzim = st.number_input(uvery_columns["kolko_este_dlzim"], min_value=0.0, step=0.01, value=float(row[uvery_columns["kolko_este_dlzim"]] or 0.0), format="%.2f", key=f"edit_dlzim_{selected_row_index}")
+                            edit_splatka = st.number_input(uvery_columns["aku_mam_mesacnu_splatku"], min_value=0.0, step=0.01, value=float(row[uvery_columns["aku_mam_mesacnu_splatku"]] or 0.0), format="%.2f", key=f"edit_splatka_{selected_row_index}")
+                        submitted_edit = st.form_submit_button("Uložiť zmeny", type="primary")
+                    if submitted_edit:
+                        st.session_state.uvery_df.loc[selected_row_index, [
+                            uvery_columns["kde_som_si_pozical"],
+                            uvery_columns["na_aky_ucel"],
+                            uvery_columns["kedy_som_si_pozical"],
+                            uvery_columns["urokova_sadzba"],
+                            uvery_columns["kolko_som_si_pozical"],
+                            uvery_columns["kolko_este_dlzim"],
+                            uvery_columns["aku_mam_mesacnu_splatku"],
+                        ]] = [
+                            (edit_kde if edit_kde in bank_types else ""),
+                            edit_ucel,
+                            edit_kedy,
+                            float(edit_urok) if edit_urok is not None else 0.0,
+                            float(edit_pozical) if edit_pozical is not None else 0.0,
+                            float(edit_dlzim) if edit_dlzim is not None else 0.0,
+                            float(edit_splatka) if edit_splatka is not None else 0.0,
+                        ]
+                        st.success("Zmeny uložené")
+                        st.rerun()
+
+        # Delete selected
+        ctrl_col4, _ = st.columns([1, 3])
+        with ctrl_col3:
+            if st.button("Zmazať vybraný", type="secondary", use_container_width=True) and selected_row_index is not None and 0 <= selected_row_index < len(st.session_state.uvery_df):
+                st.session_state.uvery_df = st.session_state.uvery_df.drop(index=selected_row_index).reset_index(drop=True)
+                st.warning("Úver zmazaný")
+                st.rerun()
+
+    # Display current loans as a read-only table
+    if uvery_df.empty:
+        st.info("Zatiaľ nie sú pridané žiadne úvery.")
+    else:
+        st.dataframe(uvery_df, use_container_width=True, hide_index=True)
+
+    # Calculate totals for loans from state
+    loan_total_borrowed = uvery_df[uvery_columns["kolko_som_si_pozical"]].fillna(0).sum() if not uvery_df.empty else 0.0
+    loan_total_remaining = uvery_df[uvery_columns["kolko_este_dlzim"]].fillna(0).sum() if not uvery_df.empty else 0.0
+    loan_total_monthly = uvery_df[uvery_columns["aku_mam_mesacnu_splatku"]].fillna(0).sum() if not uvery_df.empty else 0.0
+
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(f"**Celkom požičky: {loan_total_borrowed:.2f} €**")
@@ -595,81 +670,125 @@ with st.container(border=True):
         st.markdown(f"**Celkom dlhy: {loan_total_remaining:.2f} €**")
     with col3:
         st.markdown(f"**Splátky mesačne: {loan_total_monthly:.2f} €**")
-    
+
     st.markdown("---")
     
     # Second table - EXEKÚCIE (Executions)
     st.markdown("**EXEKÚCIE**")
-    
-    execution_types = ["č.1", "č.2", "č.3", "č.4", "č.5"]
-    
-    exekucie_data = pd.DataFrame({
-        "Číslo": execution_types,
-        "Meno exekútora": [""] * 5,
-        "Pre koho exekútor vymáha dlh?": [""] * 5,
-        "Od kedy mám exekúciu?": [""] * 5,
-        "Aktuálna výška exekúcie?": [0.0] * 5,
-        "Akou sumou ju mesačne splácam?": [0.0] * 5
-    })
-    
-    # Configure column types for executions table  
-    exekucie_column_config = {
-        "Číslo": st.column_config.TextColumn(
-            "Číslo",
-            help="Poradové číslo",
-            disabled=True
-        ),
-        "Meno exekútora": st.column_config.TextColumn(
-            "Meno exekútora",
-            help="Meno exekútora",
-            max_chars=200,
-        ),
-        "Pre koho exekútor vymáha dlh?": st.column_config.TextColumn(
-            "Pre koho exekútor vymáha dlh?",
-            help="Veriteľ",
-            max_chars=200,
-        ),
-        "Od kedy mám exekúciu?": st.column_config.TextColumn(
-            "Od kedy mám exekúciu?",
-            help="Dátum začiatku exekúcie",
-            max_chars=100,
-        ),
-        "Aktuálna výška exekúcie?": st.column_config.NumberColumn(
-            "Aktuálna výška exekúcie?",
-            help="Aktuálna suma v eurách",
-            min_value=0,
-            step=0.01,
-            format="%.2f €"
-        ),
-        "Akou sumou ju mesačne splácam?": st.column_config.NumberColumn(
-            "Akou sumou ju mesačne splácam?",
-            help="Mesačná splátka v eurách",
-            min_value=0,
-            step=0.01,
-            format="%.2f €"
+
+    # Initialize executions storage in session state
+    if "exekucie_df" not in st.session_state:
+        st.session_state.exekucie_df = pd.DataFrame({
+            "Číslo": pd.Series(dtype="string"),
+            "Meno exekútora": pd.Series(dtype="string"),
+            "Pre koho exekútor vymáha dlh?": pd.Series(dtype="string"),
+            "Od kedy mám exekúciu?": pd.Series(dtype="string"),  # keep as text for simplicity
+            "Aktuálna výška exekúcie?": pd.Series(dtype="float"),
+            "Akou sumou ju mesačne splácam?": pd.Series(dtype="float"),
+        })
+
+    def _renumber_exekucie_rows() -> None:
+        if not st.session_state.exekucie_df.empty:
+            st.session_state.exekucie_df["Číslo"] = [f"č.{i+1}" for i in range(len(st.session_state.exekucie_df))]
+
+    # Controls: add / delete selected
+    ctrl_ex1, ctrl_ex2 = st.columns([1, 1], vertical_alignment="bottom")
+    with ctrl_ex1:
+        if st.button("Pridať exekúciu", use_container_width=True):
+            new_row = {
+                "Číslo": "",
+                "Meno exekútora": "",
+                "Pre koho exekútor vymáha dlh?": "",
+                "Od kedy mám exekúciu?": "",
+                "Aktuálna výška exekúcie?": 0.0,
+                "Akou sumou ju mesačne splácam?": 0.0,
+            }
+            st.session_state.exekucie_df = pd.concat([st.session_state.exekucie_df, pd.DataFrame([new_row])], ignore_index=True)
+            _renumber_exekucie_rows()
+            st.rerun()
+
+    selected_key = None
+
+    if AgGrid is not None:
+        # Configure and render AgGrid
+        gob = GridOptionsBuilder.from_dataframe(st.session_state.exekucie_df)
+        gob.configure_default_column(editable=True, resizable=True)
+        gob.configure_column("Číslo", editable=False, width=110)
+        gob.configure_column("Aktuálna výška exekúcie?", type=["numericColumn"], valueParser="Number(value)")
+        gob.configure_column("Akou sumou ju mesačne splácam?", type=["numericColumn"], valueParser="Number(value)")
+        gob.configure_selection("single", use_checkbox=True)
+        grid = AgGrid(
+            st.session_state.exekucie_df,
+            gridOptions=gob.build(),
+            update_mode=GridUpdateMode.VALUE_CHANGED,
+            height=260,
+            fit_columns_on_grid_load=True,
+            allow_unsafe_jscode=True,
+            theme="balham",
         )
-    }
-    
-    edited_exekucie = st.data_editor(
-        exekucie_data,
-        column_config=exekucie_column_config,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="exekucie_data",
-        row_height=40
-    )
-    
+        # Persist edits from grid
+        if grid and "data" in grid:
+            st.session_state.exekucie_df = pd.DataFrame(grid["data"])
+            _renumber_exekucie_rows()
+        # Determine selected row by key (Číslo)
+        selected_rows = grid.get("selected_rows", []) if grid else []
+        if selected_rows:
+            selected_key = selected_rows[0].get("Číslo")
+    else:
+        # Fallback to data_editor if st_aggrid is not installed
+        exekucie_column_config = {
+            "Číslo": st.column_config.TextColumn("Číslo", disabled=True),
+            "Meno exekútora": st.column_config.TextColumn("Meno exekútora", max_chars=200),
+            "Pre koho exekútor vymáha dlh?": st.column_config.TextColumn("Pre koho exekútor vymáha dlh?", max_chars=200),
+            "Od kedy mám exekúciu?": st.column_config.TextColumn("Od kedy mám exekúciu?", max_chars=100),
+            "Aktuálna výška exekúcie?": st.column_config.NumberColumn("Aktuálna výška exekúcie?", min_value=0, step=0.01, format="%.2f €"),
+            "Akou sumou ju mesačne splácam?": st.column_config.NumberColumn("Akou sumou ju mesačne splácam?", min_value=0, step=0.01, format="%.2f €"),
+        }
+        edited = st.data_editor(
+            st.session_state.exekucie_df,
+            column_config=exekucie_column_config,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key="exekucie_data",
+            row_height=40,
+        )
+        st.session_state.exekucie_df = edited
+        _renumber_exekucie_rows()
+
+    with ctrl_ex2:
+        disabled = selected_key is None and not (AgGrid is None and not st.session_state.exekucie_df.empty)
+        if st.button("Zmazať vybranú", disabled=disabled, use_container_width=True):
+            if AgGrid is not None and selected_key is not None:
+                df = st.session_state.exekucie_df
+                drop_idx = df.index[df["Číslo"] == selected_key].tolist()
+                if drop_idx:
+                    st.session_state.exekucie_df = df.drop(index=drop_idx[0]).reset_index(drop=True)
+                    _renumber_exekucie_rows()
+                    st.rerun()
+            elif AgGrid is None and not st.session_state.exekucie_df.empty:
+                # In fallback, delete the last row (no selection)
+                st.session_state.exekucie_df = st.session_state.exekucie_df.iloc[:-1].reset_index(drop=True)
+                _renumber_exekucie_rows()
+                st.rerun()
+
     # Calculate totals for executions
-    execution_total_amount = edited_exekucie["Aktuálna výška exekúcie?"].sum()
-    execution_total_monthly = edited_exekucie["Akou sumou ju mesačne splácam?"].sum()
-    
+    df_ex = st.session_state.exekucie_df.copy()
+    if not df_ex.empty:
+        for col in ["Aktuálna výška exekúcie?", "Akou sumou ju mesačne splácam?"]:
+            df_ex[col] = pd.to_numeric(df_ex[col], errors="coerce").fillna(0.0)
+        execution_total_amount = float(df_ex["Aktuálna výška exekúcie?"].sum())
+        execution_total_monthly = float(df_ex["Akou sumou ju mesačne splácam?"].sum())
+    else:
+        execution_total_amount = 0.0
+        execution_total_monthly = 0.0
+
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(f"**Celkom exekúcie: {execution_total_amount:.2f} €**")
     with col2:
         st.markdown(f"**Splátky mesačne: {execution_total_monthly:.2f} €**")
-    
+
     st.markdown("---")
     
     # Third table - NEDOPLATKY (Arrears)
