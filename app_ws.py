@@ -1359,7 +1359,7 @@ def main():
             # Display loans in a clean, read-only table
             uvery_df = st.session_state.uvery_df
             if uvery_df.empty:
-                st.info("📋 Zatiaľ nie sú pridané žiadne úvery. Kliknite na '➕ Pridať úver' pre pridanie nového.")
+                st.info("Zatiaľ nie sú pridané žiadne úvery. Kliknite na '➕ Pridať úver' pre pridanie nového.")
             else:
                 # Create a display version with proper column order (without ID)
                 display_columns = ["Vybrať", uvery_columns["kde_som_si_pozical"], uvery_columns["na_aky_ucel"], uvery_columns["kedy_som_si_pozical"], uvery_columns["urokova_sadzba"], uvery_columns["kolko_som_si_pozical"], uvery_columns["kolko_este_dlzim"], uvery_columns["aku_mam_mesacnu_splatku"]]
@@ -1790,7 +1790,7 @@ def main():
             # Display nedoplatky entries in an editable table
             nedoplatky_df = st.session_state.nedoplatky_data
             if nedoplatky_df.empty:
-                st.info("📋 Zatiaľ nie sú pridané žiadne nedoplatky. Kliknite na '➕ Pridať nedoplatok' pre pridanie nového.")
+                st.info("Zatiaľ nie sú pridané žiadne nedoplatky. Kliknite na '➕ Pridať nedoplatok' pre pridanie nového.")
             else:
                 # Create a display version without ID column
                 display_df = nedoplatky_df.drop(columns=["ID"], errors="ignore")
