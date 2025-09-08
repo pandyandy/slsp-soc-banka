@@ -225,8 +225,30 @@ def main():
     if lookup_clicked and cid.strip():
         # Initialize database connection only when user clicks "Vyhľadať"
         if "db_manager" not in st.session_state:
-            with st.spinner("Hľadám CID v databázi..."):
-                db_manager, conn_status, conn_message = initialize_connection_once()
+            # Show connection status with progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("🔌 Pripájam sa k databáze...")
+            progress_bar.progress(25)
+            
+            status_text.text("🔍 Hľadám CID v databázi...")
+            progress_bar.progress(50)
+            
+            db_manager, conn_status, conn_message = initialize_connection_once()
+            
+            if db_manager:
+                status_text.text("✅ Pripojenie úspešné!")
+                progress_bar.progress(100)
+                time.sleep(0.5)  # Brief pause to show success
+                progress_bar.empty()
+                status_text.empty()
+            else:
+                status_text.text("❌ Chyba pripojenia")
+                progress_bar.progress(100)
+                time.sleep(1)
+                progress_bar.empty()
+                status_text.empty()
         else:
             db_manager, conn_status, conn_message = initialize_connection_once()
         
@@ -279,7 +301,7 @@ def main():
                 
                 st.sidebar.info(f"🕒 Formulár bol naposledy upravený: {last_updated_cet.strftime('%d.%m.%Y o %H:%M')} CET")
             except:
-                st.sidebar.finfo(f"🕒 Formulár bol naposledy upravený: {st.session_state.last_updated_info}")
+                st.sidebar.info(f"🕒 Formulár bol naposledy upravený: {st.session_state.last_updated_info}")
     
     # Reset if CID changed
     if cid.strip() != st.session_state.current_cid:
