@@ -234,16 +234,12 @@ def main():
 
         st.header("Vyhľadať CID")
 
-        if sap_id and email_zamestnanca and dnesny_datum: 
-            disabled = False    
-        else:
-            disabled = True
+
         # CID input and lookup section
         cid = st.text_input(
             "CID", 
             placeholder="Zadajte CID klienta",
             label_visibility="collapsed",
-            disabled=disabled
             )
         lookup_clicked = st.button(
             "Vyhľadať",
