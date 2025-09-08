@@ -295,17 +295,17 @@ def main():
             col1, col2, col3 = st.columns([1, 1, 2])
             with col1:
                 if st.button("🔧 Fix This CID", type="primary"):
-                    with st.spinner("Fixing corrupted data..."):
-                        db_manager = st.session_state.get("db_manager")
-                        if db_manager:
-                            success = db_manager.fix_corrupted_record(cid.strip())
-                            if success:
-                                st.success("✅ CID fixed successfully! Please refresh the page.")
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to fix CID. Please contact support.")
+                    #with st.spinner("Fixing corrupted data..."):
+                    db_manager = st.session_state.get("db_manager")
+                    if db_manager:
+                        success = db_manager.fix_corrupted_record(cid.strip())
+                        if success:
+                            st.success("✅ CID fixed successfully! Please refresh the page.")
+                            st.rerun()
                         else:
-                            st.error("❌ Database not connected. Please try searching again.")
+                            st.error("❌ Failed to fix CID. Please contact support.")
+                    else:
+                        st.error("❌ Database not connected. Please try searching again.")
             
             with col2:
                 if st.button("🔄 Refresh Page"):
