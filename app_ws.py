@@ -7,6 +7,11 @@ import time
 from datetime import date, datetime, timezone, timedelta
 
 from PIL import Image
+
+# Force reload the database manager to get the latest version
+import importlib
+import database.snowflake_manager
+importlib.reload(database.snowflake_manager)
 from database.snowflake_manager import get_db_manager
 
 
@@ -22,7 +27,6 @@ st.set_page_config(
     page_title="Sociálna banka – Dotazník", 
     page_icon=MINI_LOGO, 
     layout="wide")
-
 
 def background_color(background_color, text_color, header_text, text=None):
      content = f'<div style="font-size:20px;margin:0px 0;">{header_text}</div>'
@@ -116,7 +120,7 @@ def auto_save_data(db_manager, cid, data_to_save):
         return None, "CID required for auto-save"
     
     cid_value = cid.strip()
-    
+    #st.write(cid_value)
     # Check if CID already exists to determine operation type
     existing_data = db_manager.load_form_data(cid_value)
     is_update = existing_data is not None
@@ -154,38 +158,10 @@ def main():
             </div>
         </div>
         """, unsafe_allow_html=True)
-    # Initialize connection and read table (only once per session)
-    if "db_manager" not in st.session_state:
-        #with st.spinner("Connecting to workspace..."):
-        db_manager, conn_status, conn_message = initialize_connection_once()
-    else:
-        db_manager, conn_status, conn_message = initialize_connection_once()
-    
-    # Display connection status
-
-    if not db_manager:
-        st.stop()
-    
-    # Read existing table data (only once per session)
-    if "table_data" not in st.session_state or "table_data_loaded" not in st.session_state:
-        #with st.spinner("Reading SLSP_DEMO table..."):
-        read_success, table_data, read_message = read_table_data(db_manager)
-        
-        # Cache table data in session state
-        st.session_state.table_data = table_data if read_success else []
-        st.session_state.table_data_loaded = read_success
-        st.session_state.table_read_message = read_message
-    else:
-        # Use cached data
-        read_success = st.session_state.table_data_loaded
-        table_data = st.session_state.table_data
-        read_message = st.session_state.table_read_message
-    
-    # Display table read status
-    #if read_success:
-    #    st.info(read_message)
-    #else:
-    #r    st.error(read_message)
+    # Initialize database connection and read data only when needed
+    db_manager = None
+    conn_status = False
+    conn_message = ""
     
     # Show existing data if available
    # if table_data:
@@ -210,27 +186,6 @@ def main():
              #   st.markdown("---")
     
     with st.sidebar:
-        sap_id = st.text_input(
-            "SAP ID zamestnanca:",
-            key="sap_id",
-        )
-        # Initialize email with @slsp.sk if not set
-        if "email_zamestnanca" not in st.session_state or not st.session_state.email_zamestnanca:
-            st.session_state.email_zamestnanca = "@slsp.sk"
-        
-        email_zamestnanca = st.text_input(
-            "E-mail zamestnanca:",
-            value="@slsp.sk",
-            help="E-mail musí končiť doménou @slsp.sk",
-        )
-        if email_zamestnanca and not email_zamestnanca.endswith("@slsp.sk"):
-            st.warning("E-mail musí končiť doménou @slsp.sk", icon="⚠️")
-
-        dnesny_datum = st.date_input(
-            "Dnešný dátum:", 
-            value="today",
-            format="DD.MM.YYYY",
-        )
 
         st.header("Vyhľadať CID")
 
@@ -250,32 +205,11 @@ def main():
         # Display CID lookup status in sidebar
         if st.session_state.get("cid_checked", False) and st.session_state.get("current_cid"):
             st.markdown("---")
-            
+            #st.write(st.session_state.cid_exists)
             if st.session_state.get("cid_exists", False):
-               # st.success(f"✅ **Formulár nájdený**")
-                
-                # Show basic form info if available
-                #existing_data = st.session_state.get("existing_data", {})
-                #if existing_data.get("meno_priezvisko"):
-                #    st.write(f"**Klient:** {existing_data['meno_priezvisko']}")
-                
-                # Show last updated info immediately when CID is found
-                if st.session_state.get('last_updated_info'):
-                    #st.markdown("---")
-                    try:
-                        # Parse UTC time
-                        last_updated = datetime.fromisoformat(st.session_state.last_updated_info.replace('Z', '+00:00'))
-                        
-                        # Convert to CET (UTC+1)
-                        cet = timezone(timedelta(hours=1))
-                        last_updated_cet = last_updated.astimezone(cet)
-                        
-                        st.info(f"Formulár bol naposledy upravený: {last_updated_cet.strftime('%d.%m.%Y o %H:%M')} CET")
-                    except:
-                        st.info(f"Formulár bol naposledy upravený: {st.session_state.last_updated_info}")
-                
+                st.sidebar.success("Formulár nájdený")
             else:
-                st.info("Pre zadané CID nebol nájdený žiadny formulár. Bude vytvorený nový.", icon="ℹ️")
+                st.sidebar.info("Nový formulár bude vytvorený")
     
     # Initialize session state for CID lookup
     if "cid_checked" not in st.session_state:
@@ -289,6 +223,18 @@ def main():
     
     # Handle CID lookup
     if lookup_clicked and cid.strip():
+        # Initialize database connection only when user clicks "Vyhľadať"
+        if "db_manager" not in st.session_state:
+            with st.spinner("Hľadám CID v databázi..."):
+                db_manager, conn_status, conn_message = initialize_connection_once()
+        else:
+            db_manager, conn_status, conn_message = initialize_connection_once()
+        
+        # Check if connection was successful
+        if not db_manager:
+            st.error("❌ Failed to connect to database. Please try again.")
+            st.stop()
+        
         # Use the optimized database manager method to get data with metadata
         existing_data = db_manager.load_form_data(cid.strip())
         
@@ -307,33 +253,74 @@ def main():
         st.session_state.existing_data = form_data
         st.session_state.current_cid = cid.strip()
         st.session_state.last_updated_info = existing_data.get('_last_updated', None) if existing_data else None
+        st.session_state.needs_fix = False  # Reset fix flag on successful load
         
         # Reset income data to force reload from database on next form render
         if 'prijmy_domacnosti' in st.session_state:
             del st.session_state.prijmy_domacnosti
         
-        # Display lookup result
-        #if cid_exists is True:
-         #   st.success(message)
-          #  if existing_data:
-           #     st.info("📋 Existing data found - fields will be pre-filled below")
-                        
-       # elif cid_exists is False:
-        #    st.info(message)
-        #else:
-         #   st.error(message)
+        # Display lookup result immediately
+        if cid_exists is True:
+            st.sidebar.markdown("---")
+            st.sidebar.success(f"Formulár nájdený")
+        elif cid_exists is False:
+            st.sidebar.markdown("---")
+            st.sidebar.info(f"Nový formulár bude vytvorený")
+        
+        # Show last updated info immediately when CID is found
+        if st.session_state.get('last_updated_info'):
+            try:
+                # Parse UTC time
+                last_updated = datetime.fromisoformat(st.session_state.last_updated_info.replace('Z', '+00:00'))
+                
+                # Convert to CET (UTC+1)
+                cet = timezone(timedelta(hours=1))
+                last_updated_cet = last_updated.astimezone(cet)
+                
+                st.sidebar.info(f"🕒 Formulár bol naposledy upravený: {last_updated_cet.strftime('%d.%m.%Y o %H:%M')} CET")
+            except:
+                st.sidebar.finfo(f"🕒 Formulár bol naposledy upravený: {st.session_state.last_updated_info}")
     
     # Reset if CID changed
     if cid.strip() != st.session_state.current_cid:
         st.session_state.cid_checked = False
+        st.session_state.needs_fix = False  # Reset fix flag when CID changes
     
-    # Show data entry form only after CID is checked
-    if st.session_state.cid_checked and cid.strip():
+    # Show data entry form only after CID is checked and database is connected
+    if st.session_state.cid_checked and cid.strip() and "db_manager" in st.session_state:
+        # Add fix button for corrupted data
+        if st.session_state.get('needs_fix', False):
+            st.markdown("---")
+            st.warning("⚠️ This CID has corrupted data that needs fixing.")
+            
+            col1, col2, col3 = st.columns([1, 1, 2])
+            with col1:
+                if st.button("🔧 Fix This CID", type="primary"):
+                    with st.spinner("Fixing corrupted data..."):
+                        db_manager = st.session_state.get("db_manager")
+                        if db_manager:
+                            success = db_manager.fix_corrupted_record(cid.strip())
+                            if success:
+                                st.success("✅ CID fixed successfully! Please refresh the page.")
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to fix CID. Please contact support.")
+                        else:
+                            st.error("❌ Database not connected. Please try searching again.")
+            
+            with col2:
+                if st.button("🔄 Refresh Page"):
+                    st.rerun()
+            
+            with col3:
+                st.info("💡 The fix will clean up quotes, newlines, and other problematic characters.")
+        
         #st.markdown("---")
         # Pre-fill values if existing data found
-
         default_meno_priezvisko = st.session_state.existing_data.get("meno_priezvisko", "")
         default_datum_narodenia = st.session_state.existing_data.get("datum_narodenia", date(1900, 1, 1))
+        default_sap_id = st.session_state.existing_data.get("sap_id", "")
+        default_email_zamestnanca = st.session_state.existing_data.get("email_zamestnanca", "@slsp.sk")
 
         default_pribeh = st.session_state.existing_data.get("pribeh", "")
         default_riesenie = st.session_state.existing_data.get("riesenie", "")
@@ -356,6 +343,9 @@ def main():
         default_strava_potraviny = st.session_state.existing_data.get("strava_potraviny", 0.0)
         default_predplatne = st.session_state.existing_data.get("predplatne", 0.0)
         default_odvody = st.session_state.existing_data.get("odvody", 0.0)
+        default_poistky = st.session_state.existing_data.get("poistky", 0.0)
+        default_splatky_uverov = st.session_state.existing_data.get("splatky_uverov", 0.0)
+        default_domacnost = st.session_state.existing_data.get("domacnost", 0.0)
         default_kurenie = st.session_state.existing_data.get("kurenie", 0.0)
         default_mhd_autobus_vlak = st.session_state.existing_data.get("mhd_autobus_vlak", 0.0)
         default_cigarety = st.session_state.existing_data.get("cigarety", 0.0)
@@ -376,7 +366,40 @@ def main():
         default_nedoplatky_data = st.session_state.existing_data.get("nedoplatky_data", [])
 
         default_poznamky_dlhy = st.session_state.existing_data.get("poznamky_dlhy", "")
+                
+        # Employee information section
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.write("SAP ID zamestnanca:")
+            sap_id = st.text_input(
+                "SAP ID zamestnanca:",
+                value=default_sap_id,
+                label_visibility="collapsed",
+            )
         
+        with col2:
+            st.write("E-mail zamestnanca:")
+            # Initialize email with @slsp.sk if not set
+            if "email_zamestnanca" not in st.session_state or not st.session_state.email_zamestnanca:
+                st.session_state.email_zamestnanca = "@slsp.sk"
+            
+            email_zamestnanca = st.text_input(
+                "E-mail zamestnanca:",
+                value=default_email_zamestnanca,
+                help="E-mail musí končiť doménou @slsp.sk",
+                label_visibility="collapsed",
+            )
+            if email_zamestnanca and not email_zamestnanca.endswith("@slsp.sk"):
+                st.warning("E-mail musí končiť doménou @slsp.sk", icon="⚠️")
+        
+        with col3:
+            st.write("Dnešný dátum:")
+            dnesny_datum = st.date_input(
+                "Dnešný dátum:", 
+                value="today",
+                format="DD.MM.YYYY",
+                label_visibility="collapsed",
+            )
         col1, col2 = st.columns(2)
         with col1:
             st.write("Meno a priezvisko klienta:")
@@ -396,13 +419,17 @@ def main():
                 value=default_datum_narodenia,
                 label_visibility="collapsed",
             )
+        ""
         background_color(
             background_color="#2870ed", 
             text_color="#ffffff", 
-            header_text="1. Príbeh klienta", 
-            text="Ako ste sa dostali do finančných problémov? Čo sa zmenilo vo vašom živote? Situácia stále trvá alebo už je vyriešená?"
+            header_text="1. Životná situácia",
+            #header_text="1. Príbeh klienta", 
+            #text="Ako ste sa dostali do finančných problémov? Čo sa zmenilo vo vašom živote? Situácia stále trvá alebo už je vyriešená?"
         )
         with st.container(border=True):
+            st.markdown("#### Príbeh klienta")
+            st.markdown("Ako ste sa dostali do finančných problémov? Čo sa zmenilo vo vašom živote? Situácia stále trvá alebo už je vyriešená?")
             pribeh = st.text_area(
                 "Príbeh klienta",
                 value=default_pribeh,
@@ -410,13 +437,15 @@ def main():
                 height=150,
                 key="pribeh_textarea"
             )
-        background_color(
-            background_color="#2870ed",
-            text_color="#ffffff", 
-            header_text="2. Riešenie podľa klienta", 
-            text="Ako by ste chceli riešiť Vašu finančnú situáciu? Ako Vám môžeme pomôcť my? Koľko by ste vedeli mesačne splácať?"
-        )
-        with st.container(border=True):
+       # background_color(
+        #    background_color="#2870ed",
+         #   text_color="#ffffff", 
+          #  header_text="2. Riešenie podľa klienta", 
+         #   text="Ako by ste chceli riešiť Vašu finančnú situáciu? Ako Vám môžeme pomôcť my? Koľko by ste vedeli mesačne splácať?"
+        #)
+        #with st.container(border=True):
+            st.markdown("#### Riešenie podľa klienta")
+            st.markdown("Ako by ste chceli riešiť Vašu finančnú situáciu? Ako Vám môžeme pomôcť my? Koľko by ste vedeli mesačne splácať?")
             riesenie = st.text_area(
                 "Riešenie podľa klienta",
                 value=default_riesenie,
@@ -428,7 +457,7 @@ def main():
         background_color(
             background_color="#2870ed", 
             text_color="#ffffff", 
-            header_text="3. Domácnost", 
+            header_text="2. Domácnosť", 
         )
         with st.container(border=True):
             col1, col2 = st.columns([0.4, 0.6])
@@ -459,48 +488,59 @@ def main():
             )
 
 
-                # Create initial dataframe with the specified columns
-        column_names = {
-            "kto": "Kto:",
-            "tpp_brigada": "Čistý mesačný príjem (TPP, brigáda)",
-            "podnikanie": "Čistý mesačný príjem z podnikania", 
-            "socialne_davky": "Sociálne dávky (PN, dôchodok, rodičovský príspevok)",
-            "ine": "Iné (výživné, podpora od rodiny)"
-        }
+                    # Create initial dataframe with the specified columns
+            column_names = {
+                "kto": "Kto:",
+                "tpp_brigada": "Čistý mesačný príjem (TPP, brigáda)",
+                "podnikanie": "Čistý mesačný príjem z podnikania", 
+                "socialne_davky": "Sociálne dávky (PN, dôchodok, rodičovský príspevok)",
+                "ine": "Iné (výživné, podpora od rodiny)"
+            }
 
-                 # Initialize prijmy storage in session state
-        if "prijmy_domacnosti" not in st.session_state:
-            # Check if we have existing data to load
-            if default_prijmy_domacnosti:
-                # Load existing income data from database
-                try:
-                    loaded_df = pd.DataFrame(default_prijmy_domacnosti)
-                    # Ensure all required columns exist
-                    required_columns = {
-                        "Vybrať": "bool",
-                        "ID": "string",
-                        column_names["kto"]: "string",
-                        column_names["tpp_brigada"]: "int",
-                        column_names["podnikanie"]: "int",
-                        column_names["socialne_davky"]: "int",
-                        column_names["ine"]: "int",
-                    }
-                    
-                    for col, dtype in required_columns.items():
-                        if col not in loaded_df.columns:
-                            if dtype == "bool":
-                                loaded_df[col] = False
-                            elif dtype == "string":
-                                loaded_df[col] = ""
-                            elif dtype == "int":
-                                loaded_df[col] = 0
-                    
-                    # Reorder columns to match expected order
-                    column_order = ["Vybrať", "ID", column_names["kto"], column_names["tpp_brigada"], 
-                                column_names["podnikanie"], column_names["socialne_davky"], column_names["ine"]]
-                    st.session_state.prijmy_domacnosti = loaded_df.reindex(columns=column_order, fill_value="")
-                except Exception as e:
-                    # If loading fails, create empty dataframe
+                    # Initialize prijmy storage in session state
+            if "prijmy_domacnosti" not in st.session_state:
+                # Check if we have existing data to load
+                if default_prijmy_domacnosti:
+                    # Load existing income data from database
+                    try:
+                        loaded_df = pd.DataFrame(default_prijmy_domacnosti)
+                        # Ensure all required columns exist
+                        required_columns = {
+                            "Vybrať": "bool",
+                            "ID": "string",
+                            column_names["kto"]: "string",
+                            column_names["tpp_brigada"]: "int",
+                            column_names["podnikanie"]: "int",
+                            column_names["socialne_davky"]: "int",
+                            column_names["ine"]: "int",
+                        }
+                        
+                        for col, dtype in required_columns.items():
+                            if col not in loaded_df.columns:
+                                if dtype == "bool":
+                                    loaded_df[col] = False
+                                elif dtype == "string":
+                                    loaded_df[col] = ""
+                                elif dtype == "int":
+                                    loaded_df[col] = 0
+                        
+                        # Reorder columns to match expected order
+                        column_order = ["Vybrať", "ID", column_names["kto"], column_names["tpp_brigada"], 
+                                    column_names["podnikanie"], column_names["socialne_davky"], column_names["ine"]]
+                        st.session_state.prijmy_domacnosti = loaded_df.reindex(columns=column_order, fill_value="")
+                    except Exception as e:
+                        # If loading fails, create empty dataframe
+                        st.session_state.prijmy_domacnosti = pd.DataFrame({
+                            "Vybrať": pd.Series(dtype="bool"),
+                            "ID": pd.Series(dtype="string"),
+                            column_names["kto"]: pd.Series(dtype="string"),
+                            column_names["tpp_brigada"]: pd.Series(dtype="float"),
+                            column_names["podnikanie"]: pd.Series(dtype="float"),
+                            column_names["socialne_davky"]: pd.Series(dtype="float"),
+                            column_names["ine"]: pd.Series(dtype="float"),
+                        })
+                else:
+                    # Create empty dataframe for new records
                     st.session_state.prijmy_domacnosti = pd.DataFrame({
                         "Vybrať": pd.Series(dtype="bool"),
                         "ID": pd.Series(dtype="string"),
@@ -510,88 +550,161 @@ def main():
                         column_names["socialne_davky"]: pd.Series(dtype="float"),
                         column_names["ine"]: pd.Series(dtype="float"),
                     })
-            else:
-                # Create empty dataframe for new records
-                st.session_state.prijmy_domacnosti = pd.DataFrame({
-                    "Vybrať": pd.Series(dtype="bool"),
-                    "ID": pd.Series(dtype="string"),
-                    column_names["kto"]: pd.Series(dtype="string"),
-                    column_names["tpp_brigada"]: pd.Series(dtype="float"),
-                    column_names["podnikanie"]: pd.Series(dtype="float"),
-                    column_names["socialne_davky"]: pd.Series(dtype="float"),
-                    column_names["ine"]: pd.Series(dtype="float"),
-                })
 
-        # Ensure selection column exists for older sessions
-        if "Vybrať" not in st.session_state.prijmy_domacnosti.columns:
-            st.session_state.prijmy_domacnosti.insert(0, "Vybrať", False)
+            # Ensure selection column exists for older sessions
+            if "Vybrať" not in st.session_state.prijmy_domacnosti.columns:
+                st.session_state.prijmy_domacnosti.insert(0, "Vybrať", False)
 
-        # Migrate old data to include ID column
-        if "ID" not in st.session_state.prijmy_domacnosti.columns:
-            st.session_state.prijmy_domacnosti.insert(1, "ID", "")
-            # Generate IDs for existing entries
-            for i in range(len(st.session_state.prijmy_domacnosti)):
-                if pd.isna(st.session_state.prijmy_domacnosti.iloc[i]["ID"]) or st.session_state.prijmy_domacnosti.iloc[i]["ID"] == "":
-                    st.session_state.prijmy_domacnosti.iloc[i, st.session_state.prijmy_domacnosti.columns.get_loc("ID")] = f"PR{int(time.time()*1000) + i}"
+            # Migrate old data to include ID column
+            if "ID" not in st.session_state.prijmy_domacnosti.columns:
+                st.session_state.prijmy_domacnosti.insert(1, "ID", "")
+                # Generate IDs for existing entries
+                for i in range(len(st.session_state.prijmy_domacnosti)):
+                    if pd.isna(st.session_state.prijmy_domacnosti.iloc[i]["ID"]) or st.session_state.prijmy_domacnosti.iloc[i]["ID"] == "":
+                        st.session_state.prijmy_domacnosti.iloc[i, st.session_state.prijmy_domacnosti.columns.get_loc("ID")] = f"PR{int(time.time()*1000) + i}"
 
-        # Initialize prijmy ID counter if not exists
-        if "prijmy_id_counter" not in st.session_state:
-            st.session_state.prijmy_id_counter = 1
+            # Initialize prijmy ID counter if not exists
+            if "prijmy_id_counter" not in st.session_state:
+                st.session_state.prijmy_id_counter = 1
 
-        initial_data = pd.DataFrame({
-            column_names["kto"]: [""],
-            column_names["tpp_brigada"]: [0.0], 
-            column_names["podnikanie"]: [0.0],
-            column_names["socialne_davky"]: [0.0],
-            column_names["ine"]: [0.0]
-        })
+            initial_data = pd.DataFrame({
+                column_names["kto"]: [""],
+                column_names["tpp_brigada"]: [0.0], 
+                column_names["podnikanie"]: [0.0],
+                column_names["socialne_davky"]: [0.0],
+                column_names["ine"]: [0.0]
+            })
 
-        def _generate_prijmy_id() -> str:
-            """Generate a unique ID for income entries"""
-            timestamp = int(time.time() * 1000)  # milliseconds since epoch
-            counter = st.session_state.prijmy_id_counter
-            st.session_state.prijmy_id_counter += 1
-            return f"PR{timestamp}{counter:03d}"
+            def _generate_prijmy_id() -> str:
+                """Generate a unique ID for income entries"""
+                timestamp = int(time.time() * 1000)  # milliseconds since epoch
+                counter = st.session_state.prijmy_id_counter
+                st.session_state.prijmy_id_counter += 1
+                return f"PR{timestamp}{counter:03d}"
 
-        def add_new_prijem():
-            """Add a new income row to the dataframe"""
-            # First, save any current edits from the data editor
-            if "prijmy_data" in st.session_state:
-                edited_data = st.session_state["prijmy_data"]
-                # The data editor returns a DataFrame directly, not a dict
-                if isinstance(edited_data, pd.DataFrame):
+            def update_prijmy():
+                """Callback function to handle data editor changes and preserve data during reruns"""
+                # This function is called when the data editor changes
+                # Store the edited data in a separate session state key to prevent loss
+                if "prijmy_data" in st.session_state:
+                    edited_data = st.session_state["prijmy_data"]
+                    if isinstance(edited_data, pd.DataFrame):
+                        # Store the edited data in a separate key for persistence
+                        # Note: We don't update st.session_state.prijmy_domacnosti here as it causes
+                        # the data editor issue described in the Streamlit discussion
+                        st.session_state["prijmy_edited_data"] = edited_data.copy()
+
+            def _get_prijmy_data_for_save():
+                """Get the most up-to-date prijmy data for saving to database"""
+                # If main dataframe is empty, always return empty list (don't use cached data)
+                if st.session_state.prijmy_domacnosti.empty:
+                    return []
+                
+                # First try to get edited data, then fall back to main dataframe
+                if "prijmy_edited_data" in st.session_state and st.session_state["prijmy_edited_data"] is not None:
+                    edited_data = st.session_state["prijmy_edited_data"]
+                    if isinstance(edited_data, pd.DataFrame) and not edited_data.empty:
+                        # Add ID column back to edited data for saving
+                        if "ID" in st.session_state.prijmy_domacnosti.columns:
+                            edited_with_id = edited_data.copy()
+                            edited_with_id.insert(1, "ID", st.session_state.prijmy_domacnosti["ID"])
+                            return edited_with_id.to_dict('records')
+                        else:
+                            return edited_data.to_dict('records')
+                
+                # Fall back to main dataframe
+                return st.session_state.prijmy_domacnosti.to_dict('records')
+
+            def _get_exekucie_data_for_save():
+                """Get the most up-to-date exekucie data for saving to database"""
+                # If main dataframe is empty, always return empty list (don't use cached data)
+                if st.session_state.exekucie_df.empty:
+                    return []
+                
+                # First try to get edited data, then fall back to main dataframe
+                if "exekucie_edited_data" in st.session_state and st.session_state["exekucie_edited_data"] is not None:
+                    edited_data = st.session_state["exekucie_edited_data"]
+                    if isinstance(edited_data, pd.DataFrame) and not edited_data.empty:
+                        # Add ID column back to edited data for saving
+                        if "ID" in st.session_state.exekucie_df.columns:
+                            edited_with_id = edited_data.copy()
+                            edited_with_id.insert(1, "ID", st.session_state.exekucie_df["ID"])
+                            return edited_with_id.to_dict('records')
+                        else:
+                            return edited_data.to_dict('records')
+                
+                # Fall back to main dataframe
+                return st.session_state.exekucie_df.to_dict('records')
+
+            def _get_nedoplatky_data_for_save():
+                """Get the most up-to-date nedoplatky data for saving to database"""
+                # If main dataframe is empty, always return empty list (don't use cached data)
+                if st.session_state.nedoplatky_data.empty:
+                    return []
+                
+                # First try to get edited data, then fall back to main dataframe
+                if "nedoplatky_edited_data" in st.session_state and st.session_state["nedoplatky_edited_data"] is not None:
+                    edited_data = st.session_state["nedoplatky_edited_data"]
+                    if isinstance(edited_data, pd.DataFrame) and not edited_data.empty:
+                        # Add ID column back to edited data for saving
+                        if "ID" in st.session_state.nedoplatky_data.columns:
+                            edited_with_id = edited_data.copy()
+                            edited_with_id.insert(1, "ID", st.session_state.nedoplatky_data["ID"])
+                            return edited_with_id.to_dict('records')
+                        else:
+                            return edited_data.to_dict('records')
+                
+                # Fall back to main dataframe
+                return st.session_state.nedoplatky_data.to_dict('records')
+
+            def add_new_prijem():
+                """Add a new income row to the dataframe"""
+                # First, save any current edits from the data editor to prevent data loss
+                # Use the stored edited data if available, otherwise use the current widget data
+                edited_data = None
+                if "prijmy_edited_data" in st.session_state:
+                    edited_data = st.session_state["prijmy_edited_data"]
+                elif "prijmy_data" in st.session_state:
+                    edited_data = st.session_state["prijmy_data"]
+                
+                if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                    # Merge the edited data with the main dataframe, preserving IDs
                     if "ID" in st.session_state.prijmy_domacnosti.columns:
                         edited_data_with_id = edited_data.copy()
                         edited_data_with_id.insert(1, "ID", st.session_state.prijmy_domacnosti["ID"])
                         st.session_state.prijmy_domacnosti = edited_data_with_id
                     else:
                         st.session_state.prijmy_domacnosti = edited_data
+                
+                new_id = _generate_prijmy_id()
+                new_row = {
+                    "Vybrať": False,
+                    "ID": new_id,
+                    column_names["kto"]: "",
+                    column_names["tpp_brigada"]: 0,
+                    column_names["podnikanie"]: 0,
+                    column_names["socialne_davky"]: 0,
+                    column_names["ine"]: 0,
+                }
+                
+                # Add to dataframe
+                new_df = pd.DataFrame([new_row])
+                st.session_state.prijmy_domacnosti = pd.concat([st.session_state.prijmy_domacnosti, new_df], ignore_index=True)
+
+            # Removed edit_prijmy_dialog function - now using inline editing
+
+
+            #background_color(
+            #    background_color="#2870ed", 
+            #    text_color="#ffffff", 
+            #    header_text="Príjmy a výdavky domácnosti", 
+            #)
+
+            #with st.container(border=True):
+                # Controls: add / delete selected
+            st.markdown("<hr style='border: 1px solid #2870ed'>", unsafe_allow_html=True)
             
-            new_id = _generate_prijmy_id()
-            new_row = {
-                "Vybrať": False,
-                "ID": new_id,
-                column_names["kto"]: "",
-                column_names["tpp_brigada"]: 0,
-                column_names["podnikanie"]: 0,
-                column_names["socialne_davky"]: 0,
-                column_names["ine"]: 0,
-            }
-            
-            # Add to dataframe
-            new_df = pd.DataFrame([new_row])
-            st.session_state.prijmy_domacnosti = pd.concat([st.session_state.prijmy_domacnosti, new_df], ignore_index=True)
-
-        # Removed edit_prijmy_dialog function - now using inline editing
-
-
-        background_color(
-            background_color="#2870ed", 
-            text_color="#ffffff", 
-            header_text="4. Príjmy domácnosti", 
-        )
-        with st.container(border=True):
-            # Controls: add / delete selected
+            st.markdown("#### Príjmy domácnosti")
             ctrl_pr1, ctrl_pr2 = st.columns([1, 1], vertical_alignment="bottom")
             
             # Add income button
@@ -603,6 +716,22 @@ def main():
             # Delete income button  
             with ctrl_pr2:
                 if st.button("🗑️ Zmazať vybraný", use_container_width=True, key="delete_prijmy_btn"):
+                    # First, save any current edits from the data editor to prevent data loss
+                    edited_data = None
+                    if "prijmy_edited_data" in st.session_state:
+                        edited_data = st.session_state["prijmy_edited_data"]
+                    elif "prijmy_data" in st.session_state:
+                        edited_data = st.session_state["prijmy_data"]
+                    
+                    if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                        # Merge the edited data with the main dataframe, preserving IDs
+                        if "ID" in st.session_state.prijmy_domacnosti.columns:
+                            edited_data_with_id = edited_data.copy()
+                            edited_data_with_id.insert(1, "ID", st.session_state.prijmy_domacnosti["ID"])
+                            st.session_state.prijmy_domacnosti = edited_data_with_id
+                        else:
+                            st.session_state.prijmy_domacnosti = edited_data
+                    
                     df = st.session_state.prijmy_domacnosti
                     # Find selected rows
                     if "Vybrať" in df.columns:
@@ -624,7 +753,7 @@ def main():
             # Display income entries in an editable table
             prijmy_df = st.session_state.prijmy_domacnosti
             if prijmy_df.empty:
-                st.info("Zatiaľ nie sú evidované žiadne príjmy. Kliknite na '➕ Pridať príjem' pre pridanie nového.")
+                st.caption("Zatiaľ nie sú evidované žiadne príjmy. Kliknite na '➕ Pridať príjem' pre pridanie nového.")
             else:
                 # Create a display version without ID column
                 display_df = prijmy_df.drop(columns=["ID"], errors="ignore")
@@ -638,7 +767,6 @@ def main():
                     column_names["socialne_davky"]: st.column_config.NumberColumn("Sociálne dávky (PN, dôchodok, rodičovský príspevok)", min_value=0, step=0.10, format="%.2f €"),
                     column_names["ine"]: st.column_config.NumberColumn("Iné (výživné, podpora od rodiny)", min_value=0, step=0.10, format="%.2f €"),
                 }
-
                 edited = st.data_editor(
                     display_df,
                     column_config=editable_column_config,
@@ -646,24 +774,27 @@ def main():
                     use_container_width=True,
                     hide_index=True,
                     key="prijmy_data",
+                    on_change=update_prijmy,
                     row_height=40,
                 )
                 
-                # Update session state with the edited data
-                # Add the ID column back to the edited data
-                if "ID" in st.session_state.prijmy_domacnosti.columns:
-                    edited_with_id = edited.copy()
-                    edited_with_id.insert(1, "ID", st.session_state.prijmy_domacnosti["ID"])
-                    st.session_state.prijmy_domacnosti = edited_with_id
-                else:
-                    st.session_state.prijmy_domacnosti = edited
+                # Store the edited data for persistence across reruns
+                # Note: We don't update st.session_state.prijmy_domacnosti here as it causes
+                # the data editor issue described in the Streamlit discussion
+                st.session_state["prijmy_edited_data"] = edited.copy()
 
-            # Calculate totals for income from state
-            df_prijmy = st.session_state.prijmy_domacnosti.copy()
-            if not df_prijmy.empty:
+            # Calculate totals for income from the most up-to-date data
+            # Clear cached edited data if main dataframe is empty
+            if st.session_state.prijmy_domacnosti.empty and "prijmy_edited_data" in st.session_state:
+                del st.session_state["prijmy_edited_data"]
+            
+            prijmy_data_for_totals = _get_prijmy_data_for_save()
+            if prijmy_data_for_totals and len(prijmy_data_for_totals) > 0:
+                df_prijmy = pd.DataFrame(prijmy_data_for_totals)
                 income_columns = [column_names["tpp_brigada"], column_names["podnikanie"], column_names["socialne_davky"], column_names["ine"]]
                 for col in income_columns:
-                    df_prijmy[col] = pd.to_numeric(df_prijmy[col], errors="coerce").fillna(0)
+                    if col in df_prijmy.columns:
+                        df_prijmy[col] = pd.to_numeric(df_prijmy[col], errors="coerce").fillna(0)
                 total_income = float(df_prijmy[income_columns].sum().sum())
             else:
                 total_income = 0
@@ -676,284 +807,342 @@ def main():
                 value=default_poznamky_prijmy,
             )
             
-        background_color(
-            background_color="#2870ed", 
-            text_color="#ffffff", 
-            header_text="5. Výdavky domácnosti", 
-        )
-        with st.container(border=True):
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Nájom (bytosprávca, prenajímateľ):")
-                najom = st.number_input(
-                    "Nájom (bytosprávca, prenajímateľ):",
-                    step=0.10,
-                    value=default_najom,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col2:
-                st.write("Elektrina:")
-                elektrina = st.number_input(
-                    "Elektrina:",
-                    step=0.10,
-                    value=default_elektrina,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col3:
-                st.write("Plyn:")
-                plyn = st.number_input(
-                    "Plyn:",
-                    step=0.10,
-                    value=default_plyn,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col4:
-                st.write("Voda:")
-                voda = st.number_input(
-                    "Voda:",
-                    step=0.10,
-                    value=default_voda,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col5:
-                st.write("Kúrenie:")
-                kurenie = st.number_input(
-                    "Kúrenie:",
-                    step=0.10,
-                    value=default_kurenie,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
+        #background_color(
+        #    background_color="#2870ed", 
+        #    text_color="#ffffff", 
+        #    header_text="5. Výdavky domácnosti", 
+        #)
+        #with st.container(border=True):
+            st.markdown("<hr style='border: 1px solid #2870ed'>", unsafe_allow_html=True)
+            
+            st.markdown("#### Výdavky domácnosti")
+            #st.markdown("##### Bývanie a domácnosť")
+            with st.expander(f"Bývanie a domácnosť", expanded=True):
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Nájom (bytosprávca, prenajímateľ):")
+                    najom = st.number_input(
+                        "Nájom (bytosprávca, prenajímateľ):",
+                        step=0.10,
+                        value=default_najom,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Elektrina:")
+                    elektrina = st.number_input(
+                        "Elektrina:",
+                        step=0.10,
+                        value=default_elektrina,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Plyn:")
+                    plyn = st.number_input(
+                        "Plyn:",
+                        step=0.10,
+                        value=default_plyn,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col4:
+                    st.write("Voda:")
+                    voda = st.number_input(
+                        "Voda:",
+                        step=0.10,
+                        value=default_voda,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
 
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Iné náklady na bývanie:")
-                ine_naklady_byvanie = st.number_input(
-                    "Iné náklady na bývanie:",
-                    step=0.10,
-                    value=default_ine_naklady_byvanie,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Kúrenie:")
+                    kurenie = st.number_input(
+                        "Kúrenie:",
+                        step=0.10,
+                        value=default_kurenie,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Domácnosť (čistiace prostriedky, opravy, vybavenie):")
+                    domacnost = st.number_input(
+                        "Domácnosť (čistiace prostriedky, opravy, vybavenie):",
+                        step=0.10,
+                        value=default_domacnost,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )                
+                with col3:
+                    st.write("Iné náklady na bývanie:")
+                    ine_naklady_byvanie = st.number_input(
+                        "Iné náklady na bývanie:",
+                        step=0.10,
+                        value=default_ine_naklady_byvanie,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                byvanie_sum = najom + elektrina + plyn + voda + kurenie + domacnost + ine_naklady_byvanie
+                st.write(f"**Celkom: {byvanie_sum:.2f} €**")
+ #           ""
+            with st.expander("Rodina a osobné potreby", expanded=True):
+#            st.markdown("##### Rodina a osobné potreby")
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Strava a potraviny:")
+                    strava_potraviny = st.number_input(
+                        "Strava a potraviny:",
+                        step=0.10,
+                        value=default_strava_potraviny,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2: 
+                    st.write("Oblečenie a obuv:")
+                    oblecenie_obuv = st.number_input(
+                        "Oblečenie a obuv:",
+                        step=0.10,
+                        value=default_oblecenie_obuv,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Hygiena, kozmetika a drogéria:")
+                    hygiena_kozmetika_drogeria = st.number_input(
+                        "Hygiena, kozmetika a drogéria:",
+                        step=0.10,
+                        value=default_hygiena_kozmetika_drogeria,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col4: 
+                    st.write("Lieky, zdravie a zdravotnícko pomôcky:")
+                    lieky_zdravie = st.number_input(
+                        "Lieky, zdravie a zdravotnícko pomôcky:",
+                        step=0.10,
+                        value=default_lieky_zdravie,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )        
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Škôlka, škola, krúžky, družina, vreckové a iné výdavky na deti:")
+                    vydavky_na_deti = st.number_input(
+                        "Škôlka, škola, krúžky, družina, vreckové a iné výdavky na deti:",
+                        step=0.10,
+                        value=default_vydavky_na_deti,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Výživné:")
+                    vyzivne = st.number_input(
+                        "Výživné:",
+                        step=0.10,
+                        value=default_vyzivne,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Podpora rodičov, rodiny alebo iných osôb:")
+                    podpora_rodicov = st.number_input(
+                        "Podpora rodičov, rodiny alebo iných osôb:",
+                        step=0.10,
+                        value=default_podpora_rodicov,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col4:
+                    st.write("Domáce zvieratá:")
+                    domace_zvierata = st.number_input(
+                        "Domáce zvieratá:",
+                        step=0.10,
+                        value=default_domace_zvierata,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                rodina_sum = strava_potraviny + oblecenie_obuv + hygiena_kozmetika_drogeria + lieky_zdravie + vydavky_na_deti + vyzivne + podpora_rodicov + domace_zvierata
+                st.write(f"**Celkom: {rodina_sum:.2f} €**")
 
-            with col2:
-                st.write("TV + Internet:")
-                tv_internet = st.number_input(
-                    "TV + Internet:",
-                    step=0.10,
-                    value=default_tv_internet,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col3:
-                st.write("Telefón:")
-                telefon = st.number_input(
-                    "Telefón:",
-                    step=0.10,
-                    value=default_telefon,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col4:
-                st.write("Predplatné  (Tlač, aplikácie, permanentky, fitko apod.):")
-                predplatne = st.number_input(
-                    "Predplatné  (Tlač, aplikácie, permanentky, fitko apod.):",
-                    step=0.10,
-                    value=default_predplatne,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col5:
-                st.write("Škôlka, škola, krúžky, družina, vreckové a iné výdavky na deti:")
-                vydavky_na_deti = st.number_input(
-                    "Škôlka, škola, krúžky, družina, vreckové a iné výdavky na deti:",
-                    step=0.10,
-                    value=default_vydavky_na_deti,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
+            with st.expander("Komunikácia a voľný čas", expanded=True):
+#            st.markdown("##### Komunikácia a voľný čas")
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("TV + Internet:")
+                    tv_internet = st.number_input(
+                        "TV + Internet:",
+                        step=0.10,
+                        value=default_tv_internet,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Telefón:")
+                    telefon = st.number_input(
+                        "Telefón:",
+                        step=0.10,
+                        value=default_telefon,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3: 
+                    st.write("Volný čas a dovolenka:")
+                    volny_cas = st.number_input(
+                        "Volný čas a dovolenka:",
+                        step=0.10,
+                        value=default_volny_cas,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Predplatné  (Tlač, aplikácie, permanentky, fitko apod.):")
+                    predplatne = st.number_input(
+                        "Predplatné  (Tlač, aplikácie, permanentky, fitko apod.):",
+                        step=0.10,
+                        value=default_predplatne,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Alkohol, lotéria, žreby, tipovanie, stávkovanie a herné automaty:")
+                    alkohol_loteria_zreby = st.number_input(
+                        "Alkohol, lotéria, žreby, tipovanie, stávkovanie a herné automaty:",
+                        step=0.10,
+                        value=default_alkohol_loteria_zreby,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Cigarety:")
+                    cigarety = st.number_input(
+                        "Cigarety:",
+                        step=0.10,
+                        value=default_cigarety,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                komunikacia_sum = tv_internet + telefon + volny_cas + predplatne + alkohol_loteria_zreby + cigarety
+                st.write(f"**Celkom: {komunikacia_sum:.2f} €**")
 
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Výživné:")
-                vyzivne = st.number_input(
-                    "Výživné:",
-                    step=0.10,
-                    value=default_vyzivne,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col2:
-                st.write("Podpora rodičov, rodiny alebo iných osôb:")
-                podpora_rodicov = st.number_input(
-                    "Podpora rodičov, rodiny alebo iných osôb:",
-                    step=0.10,
-                    value=default_podpora_rodicov,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col3:
-                st.write("Strava a potraviny:")
-                strava_potraviny = st.number_input(
-                    "Strava a potraviny:",
-                    step=0.10,
-                    value=default_strava_potraviny,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col4:
-                st.write("Oblečenie a obuv:")
-                oblecenie_obuv = st.number_input(
-                    "Oblečenie a obuv:",
-                    step=0.10,
-                    value=default_oblecenie_obuv,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col5:
-                st.write("Hygiena, kozmetika a drogéria:")
-                hygiena_kozmetika_drogeria = st.number_input(
-                    "Hygiena, kozmetika a drogéria:",
-                    step=0.10,
-                    value=default_hygiena_kozmetika_drogeria,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
+            with st.expander("Doprava", expanded=True):
+           # st.markdown("##### Doprava")
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("MHD, autobus, vlak:")
+                    mhd_autobus_vlak = st.number_input(
+                        "MHD, autobus, vlak:",
+                        step=0.10,
+                        value=default_mhd_autobus_vlak,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2: 
+                    st.write("Auto – pohonné hmoty:")
+                    auto_pohonne_hmoty = st.number_input(
+                        "Auto – pohonné hmoty:",
+                        step=0.10,
+                        value=default_auto_pohonne_hmoty,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Auto – servis, PZP, diaľničné poplatky:")
+                    auto_servis_pzp_dialnicne_poplatky = st.number_input(
+                        "Auto – servis, PZP, diaľničné poplatky:",
+                        step=0.10,
+                        value=default_auto_servis_pzp_dialnicne_poplatky,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                doprava_sum = mhd_autobus_vlak + auto_pohonne_hmoty + auto_servis_pzp_dialnicne_poplatky
+                st.write(f"**Celkom: {doprava_sum:.2f} €**")
 
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Lieky, zdravie a zdravotnícko pomôcky:")
-                lieky_zdravie = st.number_input(
-                    "Lieky, zdravie a zdravotnícko pomôcky:",
-                    step=0.10,
-                    value=default_lieky_zdravie,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col2:
-                st.write("Domáce zvieratá:")
-                domace_zvierata = st.number_input(
-                    "Domáce zvieratá:",
-                    step=0.10,
-                    value=default_domace_zvierata,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col3:
-                st.write("MHD, autobus, vlak:")
-                mhd_autobus_vlak = st.number_input(
-                    "MHD, autobus, vlak:",
-                    step=0.10,
-                    value=default_mhd_autobus_vlak,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col4:
-                st.write("Auto – pohonné hmoty:")
-                auto_pohonne_hmoty = st.number_input(
-                    "Auto – pohonné hmoty:",
-                    step=0.10,
-                    value=default_auto_pohonne_hmoty,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col5:
-                st.write("Auto – servis, PZP, diaľničné poplatky:")
-                auto_servis_pzp_dialnicne_poplatky = st.number_input(
-                    "Auto – servis, PZP, diaľničné poplatky:",
-                    step=0.10,
-                    value=default_auto_servis_pzp_dialnicne_poplatky,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Sporenie:")
-                sporenie = st.number_input(
-                    "Sporenie:",
-                    step=0.10,
-                    value=default_sporenie,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col2:
-                st.write("Odvody (ak si ich platím sám):")
-                odvody = st.number_input(
-                    "Odvody (ak si ich platím sám):",
-                    step=0.10,
-                    value=default_odvody,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col3:
-                st.write("Volný čas a dovolenka:")
-                volny_cas = st.number_input(
-                    "Volný čas a dovolenka:",
-                    step=0.10,
-                    value=default_volny_cas,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col4:
-                st.write("Alkohol, lotéria, žreby, tipovanie, stávkovanie a herné automaty:")
-                alkohol_loteria_zreby = st.number_input(
-                    "Alkohol, lotéria, žreby, tipovanie, stávkovanie a herné automaty:",
-                    step=0.10,
-                    value=default_alkohol_loteria_zreby,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-            with col5:
-                st.write("Cigarety:")
-                cigarety = st.number_input(
-                    "Cigarety:",
-                    step=0.10,
-                    value=default_cigarety,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
-
-            col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-            with col1:
-                st.write("Iné:")
-                ine = st.number_input(
-                    "Iné:",
-                    step=0.10,
-                    value=default_ine,
-                    min_value=0.0,
-                    width=120,
-                    label_visibility="collapsed",
-                )
+            with st.expander("Financie a záväzky", expanded=True):
+            #st.markdown("##### Financie a záväzky")
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Sporenie:")
+                    sporenie = st.number_input(
+                        "Sporenie:",
+                        step=0.10,
+                        value=default_sporenie,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col2:
+                    st.write("Odvody (ak si ich platím sám):")
+                    odvody = st.number_input(
+                        "Odvody (ak si ich platím sám):",
+                        step=0.1,
+                        value=default_odvody,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col3:
+                    st.write("Poistky:")
+                    poistky = st.number_input(
+                        "Poistky:",
+                        step=0.10,
+                        value=default_poistky,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                with col4:
+                    st.write("Splátky úverov:")
+                    splatky_uverov = st.number_input(
+                        "Splátky úverov:",
+                        step=0.10,
+                        value=default_splatky_uverov,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
+                financie_zavazky_sum = sporenie + odvody + poistky + splatky_uverov
+                st.write(f"**Celkom: {financie_zavazky_sum:.2f} €**")
+            with st.expander("Ostatné", expanded=True):
+            #st.markdown("##### Ostatné")
+                col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
+                with col1:
+                    st.write("Iné:")
+                    ine = st.number_input(
+                        "Iné:",
+                        step=0.10,
+                        value=default_ine,
+                        min_value=0.0,
+                        width=120,
+                        label_visibility="collapsed",
+                    )
             total_expenses = najom + tv_internet + oblecenie_obuv + sporenie + elektrina + lieky_zdravie + vydavky_na_deti + vyzivne + voda + hygiena_kozmetika_drogeria + domace_zvierata + podpora_rodicov + plyn + strava_potraviny + predplatne + odvody + kurenie + mhd_autobus_vlak + cigarety + ine + ine_naklady_byvanie + auto_pohonne_hmoty + alkohol_loteria_zreby + telefon + auto_servis_pzp_dialnicne_poplatky + volny_cas
 
             # Calculate total expenses
@@ -968,7 +1157,7 @@ def main():
             #]
             #total_expenses = sum(st.session_state.get(key, 0) for key in expense_keys)
             
-            st.markdown(f"##### **Výdavky celkom: {total_expenses} €**")
+            st.markdown(f"##### **Výdavky celkom: {total_expenses:.2f} €**")
 
             poznamky_vydavky = st.text_area(
                 "Poznámky k výdavkom:",
@@ -979,7 +1168,7 @@ def main():
         background_color(
             background_color="#2870ed", 
             text_color="#ffffff", 
-            header_text="6. Dlhy", 
+            header_text="3. Dlhy", 
         )
         with st.container(border=True):
 
@@ -995,7 +1184,7 @@ def main():
             }
             
             # First table - ÚVERY (Loans)
-            st.markdown("##### **ÚVERY**")
+            st.markdown("#### **Úvery**")
 
             # Define columns mapping (reuse existing headers)
             bank_types = [
@@ -1359,7 +1548,7 @@ def main():
             # Display loans in a clean, read-only table
             uvery_df = st.session_state.uvery_df
             if uvery_df.empty:
-                st.info("Zatiaľ nie sú pridané žiadne úvery. Kliknite na '➕ Pridať úver' pre pridanie nového.")
+                st.caption("Zatiaľ nie sú pridané žiadne úvery. Kliknite na '➕ Pridať úver' pre pridanie nového.")
             else:
                 # Create a display version with proper column order (without ID)
                 display_columns = ["Vybrať", uvery_columns["kde_som_si_pozical"], uvery_columns["na_aky_ucel"], uvery_columns["kedy_som_si_pozical"], uvery_columns["urokova_sadzba"], uvery_columns["kolko_som_si_pozical"], uvery_columns["kolko_este_dlzim"], uvery_columns["aku_mam_mesacnu_splatku"]]
@@ -1396,6 +1585,7 @@ def main():
             loan_total_remaining = uvery_df[uvery_columns["kolko_este_dlzim"]].fillna(0).sum() if not uvery_df.empty else 0
             loan_total_monthly = uvery_df[uvery_columns["aku_mam_mesacnu_splatku"]].fillna(0).sum() if not uvery_df.empty else 0
 
+            ""
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown(f"**Celkom požičky: {loan_total_borrowed:.2f} €**")
@@ -1403,11 +1593,13 @@ def main():
                 st.markdown(f"**Celkom dlhy: {loan_total_remaining:.2f} €**")
             with col3:
                 st.markdown(f"**Splátky mesačne: {loan_total_monthly:.2f} €**")
-
-            st.markdown("---")
+            
+            #st.markdown("---")
             
             # Second table - EXEKÚCIE (Executions)
-            st.markdown("##### **EXEKÚCIE**")
+            st.markdown("<hr style='border: 1px solid #2870ed'>", unsafe_allow_html=True)
+            
+            st.markdown("#### **Exekúcie**")
 
             # Initialize executions storage in session state
             if "exekucie_df" not in st.session_state:
@@ -1488,17 +1680,22 @@ def main():
 
             def add_new_exekucia():
                 """Add a new execution row to the dataframe"""
-                # First, save any current edits from the data editor
-                if "_exekucie_data" in st.session_state:
+                # First, save any current edits from the data editor to prevent data loss
+                # Use the stored edited data if available, otherwise use the current widget data
+                edited_data = None
+                if "exekucie_edited_data" in st.session_state:
+                    edited_data = st.session_state["exekucie_edited_data"]
+                elif "_exekucie_data" in st.session_state:
                     edited_data = st.session_state["_exekucie_data"]
-                    # The data editor returns a DataFrame directly, not a dict
-                    if isinstance(edited_data, pd.DataFrame):
-                        if "ID" in st.session_state.exekucie_df.columns:
-                            edited_data_with_id = edited_data.copy()
-                            edited_data_with_id.insert(1, "ID", st.session_state.exekucie_df["ID"])
-                            st.session_state.exekucie_df = edited_data_with_id
-                        else:
-                            st.session_state.exekucie_df = edited_data
+                
+                if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                    # Merge the edited data with the main dataframe, preserving IDs
+                    if "ID" in st.session_state.exekucie_df.columns:
+                        edited_data_with_id = edited_data.copy()
+                        edited_data_with_id.insert(1, "ID", st.session_state.exekucie_df["ID"])
+                        st.session_state.exekucie_df = edited_data_with_id
+                    else:
+                        st.session_state.exekucie_df = edited_data
                 
                 new_id = _generate_exekucie_id()
                 new_row = {
@@ -1558,25 +1755,36 @@ def main():
             }
 
             # Display executions in an editable table - following your example pattern
-            # Create a copy without the ID column for display
-            display_df = st.session_state.exekucie_df.drop(columns=["ID"], errors="ignore")
+            exekucie_df = st.session_state.exekucie_df
             
-            # Create column config without ID column
-            display_column_config = {k: v for k, v in editable_column_config.items() if k != "ID"}
-            
-
-                        # Controls: add / delete selected
+            # Controls: add / delete selected (always visible)
             ctrl_ex1, ctrl_ex2 = st.columns([1, 1], vertical_alignment="bottom")
             
-            # Add execution button
+            # Add execution button (always visible)
             with ctrl_ex1:
                 if st.button("➕ Pridať exekúciu", use_container_width=True, key="add_exekucia_btn"):
                     add_new_exekucia()
                     st.rerun()
             
-            # Delete execution button  
+            # Delete execution button (always visible)
             with ctrl_ex2:
                 if st.button("🗑️ Zmazať vybranú", use_container_width=True, key="delete_exekucia_btn"):
+                    # First, save any current edits from the data editor to prevent data loss
+                    edited_data = None
+                    if "exekucie_edited_data" in st.session_state:
+                        edited_data = st.session_state["exekucie_edited_data"]
+                    elif "_exekucie_data" in st.session_state:
+                        edited_data = st.session_state["_exekucie_data"]
+                    
+                    if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                        # Merge the edited data with the main dataframe, preserving IDs
+                        if "ID" in st.session_state.exekucie_df.columns:
+                            edited_data_with_id = edited_data.copy()
+                            edited_data_with_id.insert(1, "ID", st.session_state.exekucie_df["ID"])
+                            st.session_state.exekucie_df = edited_data_with_id
+                        else:
+                            st.session_state.exekucie_df = edited_data
+                    
                     df = st.session_state.exekucie_df
                     # Find selected rows
                     if "Vybrať" in df.columns:
@@ -1594,39 +1802,51 @@ def main():
                             st.rerun()
                     else:
                         st.error("❌ Chyba: Stĺpec 'Vybrať' nebol nájdený")
-
-            edited_exekucie_df = st.data_editor(
-                display_df,
-                column_config=display_column_config,
-                num_rows="fixed",
-                use_container_width=True,
-                hide_index=True,
-                key="_exekucie_data",
-                row_height=40,
-            )
             
-            # Update session state with the edited data
-            # Add the ID column back to the edited data
-            if "ID" in st.session_state.exekucie_df.columns:
-                edited_exekucie_df_with_id = edited_exekucie_df.copy()
-                edited_exekucie_df_with_id.insert(1, "ID", st.session_state.exekucie_df["ID"])
-                st.session_state.exekucie_df = edited_exekucie_df_with_id
+            if exekucie_df.empty:
+                st.caption("Zatiaľ nie sú pridané žiadne exekúcie. Kliknite na '➕ Pridať exekúciu' pre pridanie nového.")
             else:
-                st.session_state.exekucie_df = edited_exekucie_df
+                # Create a copy without the ID column for display
+                display_df = exekucie_df.drop(columns=["ID"], errors="ignore")
+                
+                # Create column config without ID column
+                display_column_config = {k: v for k, v in editable_column_config.items() if k != "ID"}
+
+                edited_exekucie_df = st.data_editor(
+                    display_df,
+                    column_config=display_column_config,
+                    num_rows="fixed",
+                    use_container_width=True,
+                    hide_index=True,
+                    key="_exekucie_data",
+                    row_height=40,
+                )
+                
+                # Store the edited data for persistence across reruns
+                # Note: We don't update st.session_state.exekucie_df here as it causes
+                # the data editor issue described in the Streamlit discussion
+                st.session_state["exekucie_edited_data"] = edited_exekucie_df.copy()
 
 
 
-            # Calculate totals for executions
-            df_ex = st.session_state.exekucie_df.copy()
-            if not df_ex.empty:
+            # Calculate totals for executions from the most up-to-date data
+            # Clear cached edited data if main dataframe is empty
+            if st.session_state.exekucie_df.empty and "exekucie_edited_data" in st.session_state:
+                del st.session_state["exekucie_edited_data"]
+            
+            exekucie_data_for_totals = _get_exekucie_data_for_save()
+            if exekucie_data_for_totals and len(exekucie_data_for_totals) > 0:
+                df_ex = pd.DataFrame(exekucie_data_for_totals)
                 for col in ["Aktuálna výška exekúcie?", "Akou sumou ju mesačne splácam?"]:
-                    df_ex[col] = pd.to_numeric(df_ex[col], errors="coerce").fillna(0)
+                    if col in df_ex.columns:
+                        df_ex[col] = pd.to_numeric(df_ex[col], errors="coerce").fillna(0)
                 execution_total_amount = int(df_ex["Aktuálna výška exekúcie?"].sum())
                 execution_total_monthly = int(df_ex["Akou sumou ju mesačne splácam?"].sum())
             else:
                 execution_total_amount = 0
                 execution_total_monthly = 0
 
+            ""
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**Celkom exekúcie: {execution_total_amount} €**")
@@ -1637,8 +1857,8 @@ def main():
             ###########################################################
             # Third table - NEDOPLATKY (Arrears)
             ###########################################################
-            st.markdown("---")
-            st.markdown("##### **NEDOPLATKY**")
+            st.markdown("<hr style='border: 1px solid #2870ed'>", unsafe_allow_html=True)
+            st.markdown("#### **Nedoplatky**")
             # Define nedoplatky columns
             nedoplatky_columns = {
                 "kde_mam_nedoplatok": "Kde mám nedoplatok?",
@@ -1726,22 +1946,26 @@ def main():
 
             def add_new_nedoplatok():
                 """Add a new nedoplatok row to the dataframe"""
-                # First, save any current edits from the data editor
-                if "nedoplatky_editor" in st.session_state:
+                # First, save any current edits from the data editor to prevent data loss
+                # Use the stored edited data if available, otherwise use the current widget data
+                edited_data = None
+                if "nedoplatky_edited_data" in st.session_state:
+                    edited_data = st.session_state["nedoplatky_edited_data"]
+                elif "nedoplatky_editor" in st.session_state:
                     edited_data = st.session_state["nedoplatky_editor"]
-                    # The data editor returns a DataFrame directly, not a dict
-                    if isinstance(edited_data, pd.DataFrame):
-                        # Check if ID column already exists in edited data
-                        if "ID" in edited_data.columns:
-                            # ID column already exists, just use the edited data
-                            st.session_state.nedoplatky_data = edited_data
-                        elif "ID" in st.session_state.nedoplatky_data.columns:
-                            # Add the ID column back to the edited data
-                            edited_data_with_id = edited_data.copy()
-                            edited_data_with_id.insert(1, "ID", st.session_state.nedoplatky_data["ID"])
-                            st.session_state.nedoplatky_data = edited_data_with_id
-                        else:
-                            st.session_state.nedoplatky_data = edited_data
+                
+                if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                    # Merge the edited data with the main dataframe, preserving IDs
+                    if "ID" in edited_data.columns:
+                        # ID column already exists, just use the edited data
+                        st.session_state.nedoplatky_data = edited_data
+                    elif "ID" in st.session_state.nedoplatky_data.columns:
+                        # Add the ID column back to the edited data
+                        edited_data_with_id = edited_data.copy()
+                        edited_data_with_id.insert(1, "ID", st.session_state.nedoplatky_data["ID"])
+                        st.session_state.nedoplatky_data = edited_data_with_id
+                    else:
+                        st.session_state.nedoplatky_data = edited_data
                 
                 new_id = _generate_nedoplatky_id()
                 new_row = {
@@ -1757,18 +1981,42 @@ def main():
                 new_df = pd.DataFrame([new_row])
                 st.session_state.nedoplatky_data = pd.concat([st.session_state.nedoplatky_data, new_df], ignore_index=True)
 
-            # Controls: add / delete selected
+
+            # Display nedoplatky entries in an editable table
+            nedoplatky_df = st.session_state.nedoplatky_data
+            
+            # Controls: add / delete selected (always visible)
             ctrl_nd1, ctrl_nd2 = st.columns(2, vertical_alignment="top")
             
-            # Add nedoplatok button
+            # Add nedoplatok button (always visible)
             with ctrl_nd1:
                 if st.button("➕ Pridať nedoplatok", use_container_width=True, key="add_nedoplatky_btn"):
                     add_new_nedoplatok()
                     st.rerun()
             
-            # Delete nedoplatok button  
+            # Delete nedoplatok button (always visible)
             with ctrl_nd2:
                 if st.button("🗑️ Zmazať vybraný", use_container_width=True, key="delete_nedoplatky_btn"):
+                    # First, save any current edits from the data editor to prevent data loss
+                    edited_data = None
+                    if "nedoplatky_edited_data" in st.session_state:
+                        edited_data = st.session_state["nedoplatky_edited_data"]
+                    elif "nedoplatky_editor" in st.session_state:
+                        edited_data = st.session_state["nedoplatky_editor"]
+                    
+                    if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+                        # Merge the edited data with the main dataframe, preserving IDs
+                        if "ID" in edited_data.columns:
+                            # ID column already exists, just use the edited data
+                            st.session_state.nedoplatky_data = edited_data
+                        elif "ID" in st.session_state.nedoplatky_data.columns:
+                            # Add the ID column back to the edited data
+                            edited_data_with_id = edited_data.copy()
+                            edited_data_with_id.insert(1, "ID", st.session_state.nedoplatky_data["ID"])
+                            st.session_state.nedoplatky_data = edited_data_with_id
+                        else:
+                            st.session_state.nedoplatky_data = edited_data
+                    
                     df = st.session_state.nedoplatky_data
                     # Find selected rows
                     if "Vybrať" in df.columns:
@@ -1786,11 +2034,9 @@ def main():
                             st.rerun()
                     else:
                         st.error("❌ Chyba: Stĺpec 'Vybrať' nebol nájdený")
-
-            # Display nedoplatky entries in an editable table
-            nedoplatky_df = st.session_state.nedoplatky_data
+            
             if nedoplatky_df.empty:
-                st.info("Zatiaľ nie sú pridané žiadne nedoplatky. Kliknite na '➕ Pridať nedoplatok' pre pridanie nového.")
+                st.caption("Zatiaľ nie sú pridané žiadne nedoplatky. Kliknite na '➕ Pridať nedoplatok' pre pridanie nového.")
             else:
                 # Create a display version without ID column
                 display_df = nedoplatky_df.drop(columns=["ID"], errors="ignore")
@@ -1818,37 +2064,38 @@ def main():
                     row_height=40,
                 )
                 
-                # Update session state with the edited data
-                # Check if ID column already exists in edited data
-                if "ID" in edited.columns:
-                    # ID column already exists, just use the edited data
-                    st.session_state.nedoplatky_data = edited
-                elif "ID" in st.session_state.nedoplatky_data.columns:
-                    # Add the ID column back to the edited data
-                    edited_with_id = edited.copy()
-                    edited_with_id.insert(1, "ID", st.session_state.nedoplatky_data["ID"])
-                    st.session_state.nedoplatky_data = edited_with_id
-                else:
-                    st.session_state.nedoplatky_data = edited
+                # Store the edited data for persistence across reruns
+                # Note: We don't update st.session_state.nedoplatky_data here as it causes
+                # the data editor issue described in the Streamlit discussion
+                st.session_state["nedoplatky_edited_data"] = edited.copy()
 
-            # Calculate totals for nedoplatky from state
-            df_nedoplatky = st.session_state.nedoplatky_data.copy()
-            if not df_nedoplatky.empty:
+            # Calculate totals for nedoplatky from the most up-to-date data
+            # Clear cached edited data if main dataframe is empty
+            if st.session_state.nedoplatky_data.empty and "nedoplatky_edited_data" in st.session_state:
+                del st.session_state["nedoplatky_edited_data"]
+            
+            nedoplatky_data_for_totals = _get_nedoplatky_data_for_save()
+            if nedoplatky_data_for_totals and len(nedoplatky_data_for_totals) > 0:
+                df_nedoplatky = pd.DataFrame(nedoplatky_data_for_totals)
                 nedoplatok_columns_for_calc = [nedoplatky_columns["v_akej_vyske_mam_nedoplatok"], nedoplatky_columns["akou_sumou_ho_mesacne_splacam"]]
                 for col in nedoplatok_columns_for_calc:
-                    df_nedoplatky[col] = pd.to_numeric(df_nedoplatky[col], errors="coerce").fillna(0)
+                    if col in df_nedoplatky.columns:
+                        df_nedoplatky[col] = pd.to_numeric(df_nedoplatky[col], errors="coerce").fillna(0)
                 arrears_total_amount = int(df_nedoplatky[nedoplatky_columns["v_akej_vyske_mam_nedoplatok"]].sum())
                 arrears_total_monthly = int(df_nedoplatky[nedoplatky_columns["akou_sumou_ho_mesacne_splacam"]].sum())
             else:
                 arrears_total_amount = 0
                 arrears_total_monthly = 0
             
+            ""
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**Celkom nedoplatky: {arrears_total_amount} €**")
             with col2:
                 st.markdown(f"**Splátky mesačne: {arrears_total_monthly} €**")
-
+            
+            st.markdown("<hr style='border: 1px solid #2870ed'>", unsafe_allow_html=True)
+            
             poznamky_dlhy = st.text_area(
                 "Poznámky k dlhom:",
                 height=75,
@@ -1870,15 +2117,23 @@ def main():
                 height=150
             )
         
+        # Simple function to remove quotes from text
+        def clean_text(text):
+            if isinstance(text, str):
+                return text.replace('"', '').replace('"', '').replace('"', '')
+            return text
+        
         # Create the data to save
         data_to_save = {
-            "meno_priezvisko": meno_priezvisko,
+            "meno_priezvisko": clean_text(meno_priezvisko),
             "datum_narodenia": datum_narodenia,
-            "pribeh": pribeh,
-            "riesenie": riesenie,
+            "sap_id": sap_id,
+            "email_zamestnanca": email_zamestnanca,
+            "pribeh": clean_text(pribeh),
+            "riesenie": clean_text(riesenie),
             "pocet_clenov_domacnosti": pocet_clenov_domacnosti,
             "typ_bydliska": typ_bydliska,
-            "domacnost_poznamky": domacnost_poznamky,
+            "domacnost_poznamky": clean_text(domacnost_poznamky),
             "najom": najom,
             "tv_internet": tv_internet,
             "oblecenie_obuv": oblecenie_obuv,
@@ -1895,6 +2150,9 @@ def main():
             "strava_potraviny": strava_potraviny,
             "predplatne": predplatne,
             "odvody": odvody,
+            "poistky": poistky,
+            "splatky_uverov": splatky_uverov,
+            "domacnost": domacnost,
             "kurenie": kurenie,
             "mhd_autobus_vlak": mhd_autobus_vlak,
             "cigarety": cigarety,
@@ -1905,27 +2163,52 @@ def main():
             "telefon": telefon,
             "auto_servis_pzp_dialnicne_poplatky": auto_servis_pzp_dialnicne_poplatky,
             "volny_cas": volny_cas,
-            "poznamky_vydavky": poznamky_vydavky,
-            "poznamky_prijmy": poznamky_prijmy,
-            "prijmy_domacnosti": st.session_state.prijmy_domacnosti.to_dict('records') if not st.session_state.prijmy_domacnosti.empty else [],
+            "poznamky_vydavky": clean_text(poznamky_vydavky),
+            "poznamky_prijmy": clean_text(poznamky_prijmy),
+            "prijmy_domacnosti": _get_prijmy_data_for_save(),
             "uvery_df": st.session_state.uvery_df.to_dict('records') if not st.session_state.uvery_df.empty else [],
-            "exekucie_df": st.session_state.exekucie_df.to_dict('records') if not st.session_state.exekucie_df.empty else [],
-            "nedoplatky_data": st.session_state.nedoplatky_data.to_dict('records') if not st.session_state.nedoplatky_data.empty else [],
-            "komentar_pracovnika_slsp": komentar_pracovnika_slsp,
-            "poznamky_dlhy": poznamky_dlhy
+            "exekucie_df": _get_exekucie_data_for_save(),
+            "nedoplatky_data": _get_nedoplatky_data_for_save(),
+            "komentar_pracovnika_slsp": clean_text(komentar_pracovnika_slsp),
+            "poznamky_dlhy": clean_text(poznamky_dlhy)
         }
         
         # Auto-save when data changes
-        has_data = (pribeh or riesenie or meno_priezvisko or 
-                   pocet_clenov_domacnosti != 0 or typ_bydliska or domacnost_poznamky or 
-                   poznamky_prijmy or komentar_pracovnika_slsp or
-                   not st.session_state.prijmy_domacnosti.empty or
-                   poznamky_dlhy != "")
+        prijmy_data_for_check = _get_prijmy_data_for_save()
+        uvery_data_for_check = st.session_state.uvery_df.to_dict('records') if not st.session_state.uvery_df.empty else []
+        exekucie_data_for_check = _get_exekucie_data_for_save()
+        nedoplatky_data_for_check = _get_nedoplatky_data_for_save()
         
+        has_data = (sap_id or email_zamestnanca or meno_priezvisko or 
+                pribeh or riesenie or 
+                pocet_clenov_domacnosti != 0 or typ_bydliska or domacnost_poznamky or 
+                poznamky_prijmy or komentar_pracovnika_slsp or
+                len(prijmy_data_for_check) > 0 or
+                len(uvery_data_for_check) > 0 or
+                len(exekucie_data_for_check) > 0 or
+                len(nedoplatky_data_for_check) > 0 or
+                poznamky_dlhy != "" or
+                # Check if any expense field has been modified from its default value
+                najom != default_najom or tv_internet != default_tv_internet or oblecenie_obuv != default_oblecenie_obuv or
+                sporenie != default_sporenie or elektrina != default_elektrina or lieky_zdravie != default_lieky_zdravie or
+                vydavky_na_deti != default_vydavky_na_deti or vyzivne != default_vyzivne or voda != default_voda or
+                hygiena_kozmetika_drogeria != default_hygiena_kozmetika_drogeria or domace_zvierata != default_domace_zvierata or
+                podpora_rodicov != default_podpora_rodicov or plyn != default_plyn or strava_potraviny != default_strava_potraviny or
+                predplatne != default_predplatne or odvody != default_odvody or poistky != default_poistky or
+                splatky_uverov != default_splatky_uverov or domacnost != default_domacnost or kurenie != default_kurenie or
+                mhd_autobus_vlak != default_mhd_autobus_vlak or cigarety != default_cigarety or ine != default_ine or
+                ine_naklady_byvanie != default_ine_naklady_byvanie or auto_pohonne_hmoty != default_auto_pohonne_hmoty or
+                alkohol_loteria_zreby != default_alkohol_loteria_zreby or telefon != default_telefon or
+                auto_servis_pzp_dialnicne_poplatky != default_auto_servis_pzp_dialnicne_poplatky or volny_cas != default_volny_cas)
+    
        #st.write(data_to_save)
         if has_data:
             # Auto-save functionality
-            save_status, save_message = auto_save_data(db_manager, cid, data_to_save)
+            db_manager = st.session_state.get("db_manager")
+            if db_manager:
+                save_status, save_message = auto_save_data(db_manager, cid, data_to_save)
+            else:
+                save_status, save_message = "error", "Database not connected"
 
             # Show auto-save status
             st.markdown("---")
