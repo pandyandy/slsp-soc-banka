@@ -773,7 +773,7 @@ def main():
                 st.write("Typ bydliska:")
                 typ_bydliska = st.multiselect(
                     "Typ bydliska:",
-                    options=["Byt", "Rodinný dom", "Dvojgeneračná domácnosť", "Nájom", "Ve vlastníctve"],
+                    options=["Byt", "Rodinný dom", "Dvojgeneračná domácnosť", "Nájom", "Vo vlastníctve"],
                     default=default_typ_bydliska,
                     placeholder="Vyberte typ bydliska",
                     label_visibility="collapsed",
