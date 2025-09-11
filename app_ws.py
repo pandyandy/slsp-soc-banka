@@ -152,7 +152,7 @@ def auto_save_data(db_manager, cid, data_to_save):
 # ==============================
 # AI Helper Functions
 # ==============================
-def call_openai_completion(prompt, temperature=1, model="gpt-5-mini-2025-08-07h", messages=None):
+def call_openai_completion(prompt, temperature=1, model="gpt-5-mini-2025-08-07", messages=None):
     """Helper function for calling OpenAI Chat Completions"""
     if not OPENAI_API_KEY:
         raise Exception("OpenAI API key not configured")
