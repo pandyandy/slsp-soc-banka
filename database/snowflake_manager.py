@@ -17,17 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 class SnowflakeManager:
-    """Optimized Snowflake connection and operation manager"""
+    """Optimized Snowflake connection and operation manager with single connection caching"""
     
     def __init__(self):
         self.connection = None
-        self.last_activity = None
-        self.connection_timeout = 1800  # 30 minutes
+        self.connection_established = False
         self.max_retries = 3
         
     @st.cache_resource
     def _create_connection(_self):
-        """Create a new Snowflake connection with caching"""
+        """Create a new Snowflake connection with caching - called only once"""
         try:
             conn = snowflake.connector.connect(
                 account=st.secrets["account"],
@@ -37,9 +36,6 @@ class SnowflakeManager:
                 database=st.secrets["database"],
                 schema=st.secrets["schema"],
                 client_session_keep_alive=True,
-                #login_timeout=60,
-                #network_timeout=60,
-                # Optimization: disable autocommit for batch operations
                 autocommit=True
             )
             logger.info("Snowflake connection established successfully")
@@ -48,38 +44,30 @@ class SnowflakeManager:
             logger.error(f"Failed to create Snowflake connection: {str(e)}")
             return None
     
-    def get_connection(self) -> Optional[snowflake.connector.SnowflakeConnection]:
-        """Get active connection or create new one"""
-        current_time = time.time()
-        
-        # Check if connection exists and is not expired
-        if (self.connection and 
-            self.last_activity and 
-            (current_time - self.last_activity) < self.connection_timeout):
-            
-            # Quick connection test (lightweight)
-            if self._is_connection_alive():
-                self.last_activity = current_time
-                return self.connection
-        
-        # Create new connection
-        self.connection = self._create_connection()
-        self.last_activity = current_time if self.connection else None
-        return self.connection
-    
-    def _is_connection_alive(self) -> bool:
-        """Lightweight connection test"""
-        try:
-            if not self.connection:
-                return False
-            # Use a simple query instead of SELECT 1 for better performance
-            cursor = self.connection.cursor()
-            cursor.execute("SELECT CURRENT_TIMESTAMP()")
-            cursor.fetchone()
-            cursor.close()
+    def initialize_connection(self) -> bool:
+        """Initialize connection once at the beginning - returns True if successful"""
+        if self.connection_established and self.connection:
             return True
-        except Exception:
+            
+        try:
+            self.connection = self._create_connection()
+            if self.connection:
+                self.connection_established = True
+                logger.info("Snowflake connection initialized and cached")
+                return True
+            else:
+                logger.error("Failed to establish Snowflake connection")
+                return False
+        except Exception as e:
+            logger.error(f"Error initializing Snowflake connection: {str(e)}")
             return False
+    
+    def get_connection(self) -> Optional[snowflake.connector.SnowflakeConnection]:
+        """Get the cached connection - assumes initialize_connection() was called first"""
+        if not self.connection_established:
+            logger.warning("Connection not initialized. Call initialize_connection() first.")
+            return None
+        return self.connection
     
     @contextmanager
     def get_cursor(self):
@@ -120,8 +108,12 @@ class SnowflakeManager:
                     raise
     
     def save_form_data(self, cid: str, form_data: Dict[str, Any], phase: int = None) -> bool:
-        """Optimized form data save operation with proper data sanitization"""
-        def _save_operation():
+        """Optimized form data save operation with proper data sanitization - single connection"""
+        if not self.connection_established:
+            logger.error("Connection not initialized. Call initialize_connection() first.")
+            return False
+            
+        try:
             with self.get_cursor() as cursor:
                 # Check if record exists
                 cursor.execute("SELECT CID FROM SLSP_DEMO WHERE CID = %s", (cid,))
@@ -156,9 +148,7 @@ class SnowflakeManager:
                             (cid, json_data)
                         )
                 return True
-        
-        try:
-            return self.execute_with_retry(_save_operation)
+                
         except Exception as e:
             logger.error(f"Failed to save form data for CID {cid}: {str(e)}")
             return False
@@ -247,8 +237,12 @@ class SnowflakeManager:
         return sanitized
     
     def fix_corrupted_record(self, cid: str) -> bool:
-        """Fix a corrupted record by cleaning its JSON data"""
-        def _fix_operation():
+        """Fix a corrupted record by cleaning its JSON data - single connection"""
+        if not self.connection_established:
+            logger.error("Connection not initialized. Call initialize_connection() first.")
+            return False
+            
+        try:
             with self.get_cursor() as cursor:
                 # Get the raw data
                 cursor.execute("SELECT DATA FROM SLSP_DEMO WHERE CID = %s", (cid,))
@@ -293,155 +287,31 @@ class SnowflakeManager:
                     except Exception as e:
                         logger.error(f"Failed to fix corrupted record for CID {cid}: {str(e)}")
                         return False
-        
-        try:
-            return self.execute_with_retry(_fix_operation)
+                        
         except Exception as e:
             logger.error(f"Failed to fix corrupted record for CID {cid}: {str(e)}")
             return False
     
-    def debug_database_connection(self) -> Dict[str, Any]:
-        """Debug method to check database connection and contents"""
-        def _debug_operation():
-            with self.get_cursor() as cursor:
-                # Check if table exists
-                cursor.execute("SHOW TABLES LIKE 'SLSP_DEMO'")
-                tables = cursor.fetchall()
-                
-                # Get table info
-                cursor.execute("DESCRIBE TABLE SLSP_DEMO")
-                columns = cursor.fetchall()
-                
-                # Get record count
-                cursor.execute("SELECT COUNT(*) FROM SLSP_DEMO")
-                count = cursor.fetchone()[0]
-                
-                # Get sample CIDs
-                cursor.execute("SELECT CID FROM SLSP_DEMO LIMIT 5")
-                sample_cids = [row[0] for row in cursor.fetchall()]
-                
-                return {
-                    'table_exists': len(tables) > 0,
-                    'columns': [col[0] for col in columns],
-                    'total_records': count,
-                    'sample_cids': sample_cids
-                }
-        
-        try:
-            return self.execute_with_retry(_debug_operation)
-        except Exception as e:
-            logger.error(f"Database debug failed: {str(e)}")
-            return {'error': str(e)}
 
-    def get_all_records_dataframe(self) -> Optional[pd.DataFrame]:
-        """Get all records from SLSP_DEMO table as pandas DataFrame"""
-        def _get_all_dataframe_operation():
-            with self.get_cursor() as cursor:
-                # Get all records
-                cursor.execute("SELECT * FROM SLSP_DEMO ORDER BY CID")
-                rows = cursor.fetchall()
-                
-                if rows:
-                    # Get column names
-                    cursor.execute("DESCRIBE TABLE SLSP_DEMO")
-                    columns_info = cursor.fetchall()
-                    column_names = [col[0] for col in columns_info]
-                    
-                    # Create DataFrame with all rows
-                    df = pd.DataFrame(rows, columns=column_names)
-                    return df
-                return None
-        
-        try:
-            return self.execute_with_retry(_get_all_dataframe_operation)
-        except Exception as e:
-            logger.error(f"Failed to get all records DataFrame: {str(e)}")
+
+
+
+    def read_table_by_cid(self, cid: str) -> Optional[Dict[str, Any]]:
+        """Simple method to read table data based on CID - optimized for single connection"""
+        if not self.connection_established:
+            logger.error("Connection not initialized. Call initialize_connection() first.")
             return None
-
-    def get_raw_data(self, cid: str) -> Optional[Dict[str, Any]]:
-        """Get raw data for a given CID without JSON parsing"""
-        def _get_raw_operation():
+            
+        try:
             with self.get_cursor() as cursor:
                 cid_escaped = cid.replace("'", "''")
-                logger.info(f"Executing query for CID: {cid_escaped}")
                 
-                # First, let's check if the record exists at all
-                cursor.execute(f"SELECT COUNT(*) FROM SLSP_DEMO WHERE CID = '{cid_escaped}'")
-                count = cursor.fetchone()[0]
-                logger.info(f"Found {count} records for CID {cid}")
-                
-                if count == 0:
-                    # Let's see what CIDs actually exist
-                    cursor.execute("SELECT CID FROM SLSP_DEMO LIMIT 10")
-                    existing_cids = cursor.fetchall()
-                    logger.info(f"Sample existing CIDs: {[row[0] for row in existing_cids]}")
-                    return None
-                
-                # Now get the actual data
+                # Get the record for the CID
                 cursor.execute(f"SELECT DATA, LAST_UPDATED, PHASE FROM SLSP_DEMO WHERE CID = '{cid_escaped}'")
                 row = cursor.fetchone()
-                logger.info(f"Query returned row: {row is not None}")
-                
-                if row:
-                    return {
-                        'raw_data': row[0],  # The raw JSON string
-                        'last_updated': row[1],
-                        'phase': row[2],
-                        'data_length': len(row[0]) if row[0] else 0
-                    }
-                return None
-        
-        try:
-            return self.execute_with_retry(_get_raw_operation)
-        except Exception as e:
-            logger.error(f"Failed to get raw data for CID {cid}: {str(e)}")
-            return None
-
-    def get_cid_dataframe(self, cid: str) -> Optional[pd.DataFrame]:
-        """Get all columns for a given CID and return as pandas DataFrame"""
-        def _get_dataframe_operation():
-            with self.get_cursor() as cursor:
-                cid_escaped = cid.replace("'", "''")
-                # Get all columns from the table
-                cursor.execute(f"SELECT * FROM SLSP_DEMO WHERE CID = '{cid_escaped}'")
-                row = cursor.fetchone()
-                
-                if row:
-                    # Get column names
-                    cursor.execute("DESCRIBE TABLE SLSP_DEMO")
-                    columns_info = cursor.fetchall()
-                    column_names = [col[0] for col in columns_info]
-                    
-                    # Create DataFrame with the row data
-                    df = pd.DataFrame([row], columns=column_names)
-                    return df
-                return None
-        
-        try:
-            return self.execute_with_retry(_get_dataframe_operation)
-        except Exception as e:
-            logger.error(f"Failed to get DataFrame for CID {cid}: {str(e)}")
-            return None
-
-    def load_form_data(self, cid: str) -> Optional[Dict[str, Any]]:
-        """Load form data for given CID"""
-        def _load_operation():
-            with self.get_cursor() as cursor:
-                cid_escaped = cid.replace("'", "''")
-                logger.info(f"load_form_data: Searching for CID '{cid}' (escaped: '{cid_escaped}')")
-                
-                # Debug: Check if record exists
-                cursor.execute(f"SELECT COUNT(*) FROM SLSP_DEMO WHERE CID = '{cid_escaped}'")
-                count = cursor.fetchone()[0]
-                logger.info(f"load_form_data: Found {count} records for CID {cid}")
-                
-                cursor.execute(f"SELECT DATA, LAST_UPDATED, PHASE FROM SLSP_DEMO WHERE CID = '{cid_escaped}'")
-                row = cursor.fetchone()
-                logger.info(f"load_form_data: Query returned row: {row is not None}")
                 
                 if row and row[0]:
                     raw_data = row[0]
-                    logger.info(f"Raw data loaded for CID {cid}, length: {len(raw_data)}")
                     
                     # Process the JSON data
                     data = self.process_json_data(raw_data)
@@ -456,18 +326,24 @@ class SnowflakeManager:
                         logger.error(f"Failed to process JSON data for CID {cid}")
                         return None
                 return None
-        
-        try:
-            return self.execute_with_retry(_load_operation)
+                
         except Exception as e:
-            logger.error(f"Failed to load form data for CID {cid}: {str(e)}")
+            logger.error(f"Failed to read table data for CID {cid}: {str(e)}")
             return None
+    
+    def load_form_data(self, cid: str) -> Optional[Dict[str, Any]]:
+        """Load form data for given CID - wrapper for read_table_by_cid for backward compatibility"""
+        return self.read_table_by_cid(cid)
     
     
     
     def initialize_table(self) -> bool:
-        """Initialize the SLSP_DEMO table if it doesn't exist"""
-        def _init_operation():
+        """Initialize the SLSP_DEMO table if it doesn't exist - optimized for single connection"""
+        if not self.connection_established:
+            logger.error("Connection not initialized. Call initialize_connection() first.")
+            return False
+            
+        try:
             with self.get_cursor() as cursor:
                 # Check if table exists
                 cursor.execute("""
@@ -497,9 +373,7 @@ class SnowflakeManager:
                         pass  # Columns might already exist
                 
                 return True
-        
-        try:
-            return self.execute_with_retry(_init_operation)
+                
         except Exception as e:
             logger.error(f"Failed to initialize table: {str(e)}")
             return False
