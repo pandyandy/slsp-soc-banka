@@ -13,7 +13,6 @@ from PIL import Image
 # Force reload the database manager to get the latest version
 import importlib
 import database.snowflake_manager
-importlib.reload(database.snowflake_manager)
 from database.snowflake_manager import get_db_manager
 
 # ==============================
