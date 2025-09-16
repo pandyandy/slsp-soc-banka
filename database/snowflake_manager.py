@@ -25,7 +25,7 @@ class SnowflakeManager:
         self.connection_timeout = 1800  # 30 minutes
         self.max_retries = 3
         
-    @st.cache_resource
+    #@st.cache_resource
     def _create_connection(_self):
         """Create a new Snowflake connection with caching"""
         try:
@@ -507,7 +507,7 @@ class SnowflakeManager:
 
 
 # Global database manager instance
-@st.cache_resource
+#@st.cache_resource
 def get_db_manager():
     """Get singleton database manager instance"""
     return SnowflakeManager()
