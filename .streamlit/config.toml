@@ -6,3 +6,6 @@ textColor = "#222529"
 baseRadius="none"
 buttonRadius="none"
 font="sans-serif"
+
+[browser]
+gatherUsageStats = true
