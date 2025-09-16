@@ -27,8 +27,11 @@ class SnowflakeManager:
         
     #@st.cache_resource
     def _create_connection(_self):
-        """Create a new Snowflake connection with caching"""
+        """Create a new Snowflake connection with caching and timeout protection"""
         try:
+            logger.info("Attempting to connect to Snowflake...")
+            
+            # Add timeout protection for Keboola environment
             conn = snowflake.connector.connect(
                 account=st.secrets["account"],
                 user=st.secrets["user"],
@@ -37,8 +40,9 @@ class SnowflakeManager:
                 database=st.secrets["database"],
                 schema=st.secrets["schema"],
                 client_session_keep_alive=True,
-                #login_timeout=60,
-                #network_timeout=60,
+                # Add timeouts for Keboola environment
+                login_timeout=30,  # 30 seconds login timeout
+                network_timeout=60,  # 60 seconds network timeout
                 # Optimization: disable autocommit for batch operations
                 autocommit=True
             )
@@ -62,10 +66,24 @@ class SnowflakeManager:
                 self.last_activity = current_time
                 return self.connection
         
-        # Create new connection
-        self.connection = self._create_connection()
-        self.last_activity = current_time if self.connection else None
-        return self.connection
+        # Create new connection with timeout protection
+        try:
+            logger.info("Creating new Snowflake connection...")
+            self.connection = self._create_connection()
+            self.last_activity = current_time if self.connection else None
+            
+            if self.connection:
+                logger.info("New connection created successfully")
+            else:
+                logger.error("Failed to create new connection")
+                
+            return self.connection
+            
+        except Exception as e:
+            logger.error(f"Error creating connection: {str(e)}")
+            self.connection = None
+            self.last_activity = None
+            return None
     
     def _is_connection_alive(self) -> bool:
         """Lightweight connection test"""
