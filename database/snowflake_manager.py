@@ -57,29 +57,14 @@ class SnowflakeManager:
             self.last_activity and 
             (current_time - self.last_activity) < self.connection_timeout):
             
-            # Quick connection test (lightweight)
-            if self._is_connection_alive():
-                self.last_activity = current_time
-                return self.connection
+            self.last_activity = current_time
+            return self.connection
         
         # Create new connection
         self.connection = self._create_connection()
         self.last_activity = current_time if self.connection else None
         return self.connection
     
-    def _is_connection_alive(self) -> bool:
-        """Lightweight connection test"""
-        try:
-            if not self.connection:
-                return False
-            # Use a simple query instead of SELECT 1 for better performance
-            cursor = self.connection.cursor()
-            cursor.execute("SELECT CURRENT_TIMESTAMP()")
-            cursor.fetchone()
-            cursor.close()
-            return True
-        except Exception:
-            return False
     
     @contextmanager
     def get_cursor(self):
