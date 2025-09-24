@@ -59,8 +59,8 @@ def initialize_connection_once():
         db_manager = get_db_manager()
         
         # Test connection
-        conn = db_manager.get_connection()
-        if not conn:
+        session = db_manager.get_session()
+        if not session:
             return None, False, "❌ Failed to connect to Snowflake workspace"
         
         # Initialize table if needed (only once)
@@ -79,14 +79,15 @@ def initialize_connection_once():
 
 def read_table_data(db_manager):
     """
-    Read all data from SLSP_DEMO table using cursor and pandas
+    Read all data from SLSP_DEMO table using Snowpark and pandas
     Returns: (success, data_list, message)
     """
     try:
-        # Use cursor to get data and convert to pandas DataFrame
-        with db_manager.get_cursor() as cursor:
-            cursor.execute("SELECT CID, DATA, PHASE, LAST_UPDATED FROM SLSP_DEMO ORDER BY CID")
-            rows = cursor.fetchall()
+        # Use Snowpark to get data and convert to pandas DataFrame
+        with db_manager.get_session_context() as session:
+            snowpark_df = session.table("SLSP_DEMO").select("CID", "DATA", "PHASE", "LAST_UPDATED").order_by("CID")
+            pandas_df = snowpark_df.to_pandas()
+            rows = pandas_df.values.tolist()
             
             if rows:
                 # Convert to pandas DataFrame
