@@ -21,8 +21,6 @@ class SnowflakeManager:
     
     def __init__(self):
         self.connection = None
-        self.last_activity = None
-        self.connection_timeout = 1800  # 30 minutes
         self.max_retries = 3
         
     @st.cache_resource
@@ -48,28 +46,15 @@ class SnowflakeManager:
             logger.error(f"Failed to create Snowflake connection: {str(e)}")
             return None
     
-    def get_connection(self) -> Optional[snowflake.connector.SnowflakeConnection]:
-        """Get active connection or create new one"""
-        current_time = time.time()
-        
-        # Check if connection exists and is not expired
-        if (self.connection and 
-            self.last_activity and 
-            (current_time - self.last_activity) < self.connection_timeout):
-            
-            self.last_activity = current_time
-            return self.connection
-        
-        # Create new connection
-        self.connection = self._create_connection()
-        self.last_activity = current_time if self.connection else None
-        return self.connection
     
     
     @contextmanager
     def get_cursor(self):
         """Context manager for database cursor operations"""
-        conn = self.get_connection()
+        # Create the connection if missing; otherwise reuse it
+        if not self.connection:
+            self.connection = self._create_connection()
+        conn = self.connection
         if not conn:
             raise Exception("Unable to establish database connection")
         
