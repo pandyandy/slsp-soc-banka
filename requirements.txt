@@ -1,2 +1,1 @@
-streamlit==1.48.0
-pandas
+snowflake-snowpark-python[pandas]
