@@ -474,7 +474,7 @@ class SnowflakeManager:
 
 
 # Global database manager instance
-@st.cache_resource
+#@st.cache_resource
 def get_db_manager():
     """Get singleton database manager instance"""
     return SnowflakeManager()
