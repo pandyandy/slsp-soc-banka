@@ -26,7 +26,7 @@ class SnowflakeManager:
         self.connection_timeout = 1800  # 30 minutes
         self.max_retries = 3
         
-    @st.cache_resource
+    #@st.cache_resource
     def _create_session(_self):
         """Create a new Snowpark session with caching"""
         try:
