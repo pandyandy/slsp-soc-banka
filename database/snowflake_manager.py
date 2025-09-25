@@ -8,6 +8,9 @@ from snowflake.snowpark.context import get_active_session
 import json
 import pandas as pd
 import time
+import os
+import uuid
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 import logging
 from contextlib import contextmanager
@@ -16,443 +19,449 @@ from contextlib import contextmanager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-class SnowflakeManager:
-    """Optimized Snowflake connection and operation manager using Snowpark"""
+class SnowflakeDBManager:
+    """Database manager class for Snowflake operations"""
     
     def __init__(self):
         self.session = None
-        self.max_retries = 3
-        
-    @st.cache_resource
-    def _create_session(_self):
-        """Create a new Snowpark session with caching"""
+        self._initialize_session_state()
+    
+    def _initialize_session_state(self):
+        """Initialize session state for Snowflake session"""
+        if 'snowflake_session' not in st.session_state:
+            st.session_state['snowflake_session'] = None
+    
+    def get_session(self):
+        """Get or create Snowflake session"""
+        return get_snowflake_session()
+    
+    def initialize_table(self):
+        """Initialize the main table if it doesn't exist"""
         try:
-            connection_parameters = {
+            session = self.get_session()
+            if not session:
+                return False
+            
+            # Check if table exists and create if needed
+            table_name = st.secrets.get("WORKSPACE_SOURCE_TABLE_ID", "SLSP_DEMO")
+            check_table_query = f"SHOW TABLES LIKE '{table_name}'"
+            result = session.sql(check_table_query).collect()
+            
+            if not result:
+                # Create table if it doesn't exist
+                create_table_query = f"""
+                CREATE TABLE IF NOT EXISTS "{table_name}" (
+                    "CID" VARCHAR(255) PRIMARY KEY,
+                    "DATA" VARIANT,
+                    "LAST_UPDATED" TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                    "CREATED_AT" TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                    "PHASE" INTEGER DEFAULT 0
+                )
+                """
+                session.sql(create_table_query).collect()
+                logger.info(f"Created table {table_name}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize table: {e}")
+            return False
+    
+    def read_row_by_cid(self, cid: str, table_name: str = None):
+        """Read a specific row by CID"""
+        try:
+            session = self.get_session()
+            if not session:
+                return None
+            
+            if not table_name:
+                table_name = st.secrets.get("WORKSPACE_SOURCE_TABLE_ID", "SLSP_DEMO")
+            
+            query = f'SELECT * FROM "{table_name}" WHERE "CID" = \'{cid}\''
+            result = session.sql(query).collect()
+            
+            if result:
+                # Convert to pandas DataFrame
+                df = pd.DataFrame([row.asDict() for row in result])
+                return df
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to read row by CID {cid}: {e}")
+            return None
+    
+    def insert_or_update_data(self, cid: str, data: dict, table_name: str = None):
+        """Insert new data or update existing data for a CID"""
+        try:
+            session = self.get_session()
+            if not session:
+                return False
+            
+            if not table_name:
+                table_name = st.secrets.get("WORKSPACE_SOURCE_TABLE_ID", "SLSP_DEMO")
+            
+            # Check if CID exists
+            existing_row = self.read_row_by_cid(cid, table_name)
+            
+            if existing_row is not None and not existing_row.empty:
+                # Update existing row
+                data_json = json.dumps(data)
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                
+                update_query = f"""
+                UPDATE "{table_name}" 
+                SET "DATA" = PARSE_JSON('{data_json}'),
+                    "LAST_UPDATED" = '{current_time}',
+                    "PHASE" = 1
+                WHERE "CID" = '{cid}'
+                """
+                session.sql(update_query).collect()
+                logger.info(f"Updated row for CID: {cid}")
+            else:
+                # Insert new row
+                data_json = json.dumps(data)
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                
+                insert_query = f"""
+                INSERT INTO "{table_name}" ("CID", "DATA", "LAST_UPDATED", "CREATED_AT", "PHASE")
+                VALUES ('{cid}', PARSE_JSON('{data_json}'), '{current_time}', '{current_time}', 1)
+                """
+                session.sql(insert_query).collect()
+                logger.info(f"Inserted new row for CID: {cid}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to insert/update data for CID {cid}: {e}")
+            return False
+
+    # ==============================
+    # Compatibility methods used by app_ws.py
+    # ==============================
+    def get_session_for_direct_use(self):
+        """Return the underlying Snowflake session (for direct SQL use)."""
+        return self.get_session()
+
+    def load_form_data(self, cid: str, table_name: str = None) -> Optional[Dict[str, Any]]:
+        """Load form data as a Python dict for a given CID with metadata.
+
+        Returns a dict of the DATA column plus metadata keys:
+          - _last_updated (ISO string)
+          - _created_at (ISO string)
+          - _phase (int)
+        Returns None if no record exists.
+        """
+        try:
+            if not table_name:
+                table_name = st.secrets.get("WORKSPACE_SOURCE_TABLE_ID", "SLSP_DEMO")
+
+            df = self.read_row_by_cid(cid, table_name)
+            if df is None or df.empty:
+                return None
+
+            row = df.iloc[0]
+            data_value = row.get("DATA")
+            if isinstance(data_value, str):
+                try:
+                    data_obj = json.loads(data_value)
+                except Exception:
+                    # If it's a plain string not JSON, store as a simple field
+                    data_obj = {"_raw_data": data_value}
+            elif isinstance(data_value, (dict, list)):
+                data_obj = data_value
+            else:
+                # Snowpark might return a variant-like object; convert via json.dumps if possible
+                try:
+                    data_obj = json.loads(json.dumps(data_value))
+                except Exception:
+                    data_obj = {}
+
+            # Attach metadata
+            last_updated = row.get("LAST_UPDATED")
+            created_at = row.get("CREATED_AT")
+            phase = row.get("PHASE", 0)
+
+            if isinstance(last_updated, datetime):
+                last_updated_iso = last_updated.replace(microsecond=0).isoformat() + "Z"
+            else:
+                last_updated_iso = str(last_updated) if last_updated is not None else None
+
+            if isinstance(created_at, datetime):
+                created_at_iso = created_at.replace(microsecond=0).isoformat() + "Z"
+            else:
+                created_at_iso = str(created_at) if created_at is not None else None
+
+            data_obj["_last_updated"] = last_updated_iso
+            data_obj["_created_at"] = created_at_iso
+            data_obj["_phase"] = int(phase) if pd.notna(phase) else 0
+
+            return data_obj
+        except Exception as e:
+            logger.error(f"Failed to load form data for CID {cid}: {e}")
+            return None
+
+    def save_form_data(self, cid: str, data_to_save: Dict[str, Any], table_name: str = None) -> bool:
+        """Save form data; inserts or updates as needed. Returns True on success."""
+        try:
+            # Remove internal metadata keys before saving
+            cleaned = {k: v for k, v in data_to_save.items() if not str(k).startswith("_")}
+            return self.insert_or_update_data(cid, cleaned, table_name)
+        except Exception as e:
+            logger.error(f"Failed to save form data for CID {cid}: {e}")
+            return False
+
+    def fix_corrupted_record(self, cid: str, table_name: str = None) -> bool:
+        """Attempt to fix a corrupted JSON record by re-serializing and saving it."""
+        try:
+            existing = self.load_form_data(cid, table_name)
+            if existing is None:
+                # Nothing to fix
+                return False
+
+            # Basic cleanup: ensure the DATA is JSON-serializable and remove problematic characters
+            def _clean_obj(obj):
+                if isinstance(obj, str):
+                    return obj.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+                if isinstance(obj, list):
+                    return [_clean_obj(x) for x in obj]
+                if isinstance(obj, dict):
+                    return {str(_clean_obj(k)): _clean_obj(v) for k, v in obj.items()}
+                return obj
+
+            cleaned = {k: v for k, v in existing.items() if not str(k).startswith("_")}
+            cleaned = _clean_obj(cleaned)
+            return self.insert_or_update_data(cid, cleaned, table_name)
+        except Exception as e:
+            logger.error(f"Failed to fix corrupted record for CID {cid}: {e}")
+            return False
+
+# Global instance
+_db_manager = None
+
+def get_db_manager():
+    """Get or create the global database manager instance"""
+    global _db_manager
+    if _db_manager is None:
+        _db_manager = SnowflakeDBManager()
+    return _db_manager
+
+def map_json_to_snowflake_type(json_type: str) -> str:
+    """Map JSON schema types to Snowflake data types"""
+    type_mapping = {
+        'str': 'VARCHAR(16777216)',
+        'int': 'INTEGER',
+        'float': 'FLOAT',
+        'bool': 'BOOLEAN',
+        'datetime': 'TIMESTAMP_NTZ',
+        'date': 'DATE'
+    }
+    return type_mapping.get(json_type, 'VARCHAR(16777216)')
+
+def get_snowflake_session():
+    """Create and return a Snowflake session using Snowpark."""
+    if 'snowflake_session' not in st.session_state or st.session_state['snowflake_session'] is None:
+        # Set up Snowflake connection parameters from st.secrets
+        try:
+            snowflake_config = {
                 "account": st.secrets["account"],
                 "user": st.secrets["user"],
                 "password": st.secrets["password"],
                 "warehouse": st.secrets["warehouse"],
                 "database": st.secrets["database"],
-                "schema": st.secrets["schema"],
+                "schema": st.secrets["schema"]
             }
+
+            # Create and store the session in session state
+            st.session_state["snowflake_session"] = Session.builder.configs(snowflake_config).create()
+            #client.create_event(message='Streamlit App Snowflake Init Connection', event_type='keboola_data_app_snowflake_init')
+        except Exception as e:
+            st.error(f"Error creating Snowflake session: {e}")
+            return None
+
+        return st.session_state["snowflake_session"]
+    # Return the existing session if already created
+    return st.session_state["snowflake_session"]
+
+
+
+def read_data_snowflake(table_id):
+    """Read data from Snowflake table into a Pandas DataFrame using Snowpark."""
+    try:
+        # Get the reusable Snowflake session
+        session = get_snowflake_session()
+
+        # Check if session is None
+        if session is None:
+            st.error("Snowflake session could not be created.")
+            return
             
-            session = Session.builder.configs(connection_parameters).create()
-            logger.info("Snowpark session established successfully")
-            return session
-        except Exception as e:
-            logger.error(f"Failed to create Snowpark session: {str(e)}")
-            return None
-    
-    def get_session(self) -> Optional[Session]:
-        """Create session once and reuse without timeout or liveness checks"""
-        if self.session is None:
-            self.session = self._create_session()
-        return self.session
-    
-    def get_session_for_direct_use(self) -> Optional[Session]:
-        """Get session for direct SQL operations (advanced use cases)"""
-        return self.get_session()
-    
-    @contextmanager
-    def get_session_context(self):
-        """Context manager for database session operations"""
-        session = self.get_session()
-        if not session:
-            raise Exception("Unable to establish database session")
+        # Load data from Snowflake table into a Pandas DataFrame
+        columns = ['CID', 'DATA', 'LAST_UPDATED', 'CREATED_AT', 'PHASE']
         
-        try:
-            yield session
-        except Exception as e:
-            logger.error(f"Database operation failed: {str(e)}")
-            raise
-    
-    def execute_with_retry(self, operation_func, *args, **kwargs):
-        """Execute database operation with retry logic"""
-        for attempt in range(self.max_retries):
-            try:
-                return operation_func(*args, **kwargs)
-            except Exception as e:
-                error_msg = str(e).lower()
-                if ("connection" in error_msg or "timeout" in error_msg or "session" in error_msg) and attempt < self.max_retries - 1:
-                    logger.warning(f"Database operation failed (attempt {attempt + 1}), retrying...")
-                    # Clear session to force reconnect
-                    self.session = None
-                    time.sleep(1)  # Brief pause before retry
-                    continue
-                else:
-                    logger.error(f"Database operation failed after {attempt + 1} attempts: {str(e)}")
-                    raise
-    
-    def save_form_data(self, cid: str, form_data: Dict[str, Any], phase: int = None) -> bool:
-        """Optimized form data save operation with proper data sanitization"""
-        def _save_operation():
-            with self.get_session_context() as session:
-                # Check if record exists
-                result = session.sql("SELECT CID FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                exists = len(result) > 0
-                
-                # Sanitize form data before JSON serialization
-                sanitized_data = self.sanitize_form_data(form_data)
-                
-                # Use parameterized query to avoid SQL injection issues
-                json_data = json.dumps(sanitized_data, default=str, ensure_ascii=False)
-                
-                if exists:
-                    if phase is not None:
-                        session.sql(
-                            "UPDATE SLSP_DEMO SET DATA = :json_data, PHASE = :phase, LAST_UPDATED = CURRENT_TIMESTAMP() WHERE CID = :cid",
-                            params={"json_data": json_data, "phase": phase, "cid": cid}
-                        ).collect()
-                    else:
-                        session.sql(
-                            "UPDATE SLSP_DEMO SET DATA = :json_data, LAST_UPDATED = CURRENT_TIMESTAMP() WHERE CID = :cid",
-                            params={"json_data": json_data, "cid": cid}
-                        ).collect()
-                else:
-                    if phase is not None:
-                        session.sql(
-                            "INSERT INTO SLSP_DEMO (CID, DATA, PHASE, CREATED_AT, LAST_UPDATED) VALUES (:cid, :json_data, :phase, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())",
-                            params={"cid": cid, "json_data": json_data, "phase": phase}
-                        ).collect()
-                    else:
-                        session.sql(
-                            "INSERT INTO SLSP_DEMO (CID, DATA, CREATED_AT, LAST_UPDATED) VALUES (:cid, :json_data, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())",
-                            params={"cid": cid, "json_data": json_data}
-                        ).collect()
-                return True
-        
-        try:
-            return self.execute_with_retry(_save_operation)
-        except Exception as e:
-            logger.error(f"Failed to save form data for CID {cid}: {str(e)}")
-            return False
-    
-    def process_json_data(self, raw_data: str) -> Optional[Dict[str, Any]]:
-        """Process raw JSON data with error handling and cleaning"""
-        if not raw_data:
-            return None
-            
-        try:
-            # Try to parse as-is first
-            return json.loads(raw_data)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parsing failed, attempting to clean data: {str(e)}")
-            
-            # Try cleaning the data with better newline handling
-            try:
-                cleaned_data = self.clean_json_data_advanced(raw_data)
-                return json.loads(cleaned_data)
-            except json.JSONDecodeError as e2:
-                logger.error(f"JSON parsing failed even after cleaning: {str(e2)}")
-                return None
+        df_snowflake = session.table(table_id).select(columns).to_pandas()
+        #client.create_event(message='Streamlit App Snowflake Read Table', event_type='keboola_data_app_snowflake_read_table', event_data=f'table_id: {table_id}')
 
-    def clean_json_data(self, raw_data: str) -> str:
-        """Clean JSON data by removing or replacing problematic characters"""
-        # Remove control characters except for \n, \r, \t
-        import re
-        # Replace control characters with spaces (except newlines, carriage returns, tabs)
-        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ', raw_data)
-        return cleaned
-    
-    def clean_json_data_advanced(self, raw_data: str) -> str:
-        """Advanced JSON cleaning specifically for newline issues"""
-        # More aggressive approach - replace all newlines, tabs, and carriage returns
-        cleaned = raw_data.replace('\n', '\\n')
-        cleaned = cleaned.replace('\t', '\\t')
-        cleaned = cleaned.replace('\r', '\\r')
-        return cleaned
-    
-    def sanitize_form_data(self, form_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Sanitize form data to prevent JSON corruption"""
-        import re
-        sanitized = {}
-        
-        for key, value in form_data.items():
-            if isinstance(value, str):
-                # For string values, ensure they don't contain problematic characters
-                # that could break JSON structure
-                sanitized_value = value
-                
-                # Step 1: Replace newlines, tabs, and carriage returns with spaces
-                sanitized_value = sanitized_value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                
-                # Step 2: Replace any remaining control characters with spaces
-                sanitized_value = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ', sanitized_value)
-                
-                # Step 3: Clean up multiple spaces and trim
-                sanitized_value = re.sub(r' +', ' ', sanitized_value).strip()
-                
-                # Step 4: Remove all quotes to prevent JSON corruption
-                sanitized_value = sanitized_value.replace('"', '').replace('"', '').replace('"', '')
-                sanitized_value = sanitized_value.replace(''', '').replace(''', '')
-                
-                sanitized[key] = sanitized_value
-            elif isinstance(value, list):
-                # For lists, sanitize each item
-                sanitized_list = []
-                for item in value:
-                    if isinstance(item, dict):
-                        sanitized_list.append(self.sanitize_form_data(item))
-                    elif isinstance(item, str):
-                        # Apply same sanitization to list items
-                        item_clean = item.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                        item_clean = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ', item_clean)
-                        item_clean = re.sub(r' +', ' ', item_clean).strip()
-                        item_clean = item_clean.replace('"', '').replace('"', '').replace('"', '')
-                        item_clean = item_clean.replace(''', '').replace(''', '')
-                        sanitized_list.append(item_clean)
-                    else:
-                        sanitized_list.append(item)
-                sanitized[key] = sanitized_list
-            else:
-                # For other types, keep as-is
-                sanitized[key] = value
-        
-        return sanitized
-    
-    def fix_corrupted_record(self, cid: str) -> bool:
-        """Fix a corrupted record by cleaning its JSON data"""
-        def _fix_operation():
-            with self.get_session_context() as session:
-                # Get the raw data
-                result = session.sql("SELECT DATA FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                if not result:
-                    return False
-                
-                raw_data = result[0][0]
-                
-                # Try to parse the JSON
-                try:
-                    parsed_data = json.loads(raw_data)
-                    # If it parses successfully, sanitize and save
-                    sanitized_data = self.sanitize_form_data(parsed_data)
-                    fixed_json = json.dumps(sanitized_data, default=str, ensure_ascii=False)
-                    
-                    # Update the database
-                    session.sql(
-                        "UPDATE SLSP_DEMO SET DATA = :fixed_json, LAST_UPDATED = CURRENT_TIMESTAMP() WHERE CID = :cid",
-                        params={"fixed_json": fixed_json, "cid": cid}
-                    ).collect()
-                    return True
-                    
-                except json.JSONDecodeError:
-                    # If JSON is corrupted, try to clean it
-                    try:
-                        # Use the advanced cleaning method
-                        cleaned_data = self.clean_json_data_advanced(raw_data)
-                        parsed_data = json.loads(cleaned_data)
-                        
-                        # Sanitize and save
-                        sanitized_data = self.sanitize_form_data(parsed_data)
-                        fixed_json = json.dumps(sanitized_data, default=str, ensure_ascii=False)
-                        
-                        # Update the database
-                        session.sql(
-                            "UPDATE SLSP_DEMO SET DATA = :fixed_json, LAST_UPDATED = CURRENT_TIMESTAMP() WHERE CID = :cid",
-                            params={"fixed_json": fixed_json, "cid": cid}
-                        ).collect()
-                        return True
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to fix corrupted record for CID {cid}: {str(e)}")
-                        return False
-        
-        try:
-            return self.execute_with_retry(_fix_operation)
-        except Exception as e:
-            logger.error(f"Failed to fix corrupted record for CID {cid}: {str(e)}")
-            return False
-    
-    def debug_database_connection(self) -> Dict[str, Any]:
-        """Debug method to check database connection and contents"""
-        def _debug_operation():
-            with self.get_session_context() as session:
-                # Check if table exists
-                tables = session.sql("SHOW TABLES LIKE 'SLSP_DEMO'").collect()
-                
-                # Get table info
-                columns = session.sql("DESCRIBE TABLE SLSP_DEMO").collect()
-                
-                # Get record count
-                count_result = session.sql("SELECT COUNT(*) FROM SLSP_DEMO").collect()
-                count = count_result[0][0] if count_result else 0
-                
-                # Get sample CIDs
-                sample_cids_result = session.sql("SELECT CID FROM SLSP_DEMO LIMIT 5").collect()
-                sample_cids = [row[0] for row in sample_cids_result]
-                
-                return {
-                    'table_exists': len(tables) > 0,
-                    'columns': [col[0] for col in columns],
-                    'total_records': count,
-                    'sample_cids': sample_cids
-                }
-        
-        try:
-            return self.execute_with_retry(_debug_operation)
-        except Exception as e:
-            logger.error(f"Database debug failed: {str(e)}")
-            return {'error': str(e)}
+        # Store in session state
+        st.session_state['df'] = df_snowflake
+        #st.write(df_snowflake)
 
-    def get_all_records_dataframe(self) -> Optional[pd.DataFrame]:
-        """Get all records from SLSP_DEMO table as pandas DataFrame"""
-        def _get_all_dataframe_operation():
-            with self.get_session_context() as session:
-                # Get all records using Snowpark DataFrame
-                snowpark_df = session.table("SLSP_DEMO").order_by("CID")
-                
-                # Convert to pandas DataFrame
-                pandas_df = snowpark_df.to_pandas()
-                
-                return pandas_df if not pandas_df.empty else None
+    except Exception as e:
+        st.error(f"Failed to load data from Snowflake: {e}")
+        st.stop()
+
+
+def execute_query_snowflake(query: str, return_result=False):
+    # Step 3: Write the filter incrementally to the database using Snowpark
+    try:
+        # Get Snowflake session
+        session = get_snowflake_session()
+        result = session.sql(query).collect()
+        #client.create_event(message='Streamlit App Snowflake Query', event_type='keboola_data_app_snowflake_query', event_data=f'Query: {query}')
         
-        try:
-            return self.execute_with_retry(_get_all_dataframe_operation)
-        except Exception as e:
-            logger.error(f"Failed to get all records DataFrame: {str(e)}")
+        if return_result:
+            return result
+    except Exception as e:
+        st.error(f"Failed to execute a query: {e}")
+        if return_result:
             return None
 
-    def get_raw_data(self, cid: str) -> Optional[Dict[str, Any]]:
-        """Get raw data for a given CID without JSON parsing"""
-        def _get_raw_operation():
-            with self.get_session_context() as session:
-                logger.info(f"Executing query for CID: {cid}")
-                
-                # First, let's check if the record exists at all
-                count_result = session.sql("SELECT COUNT(*) FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                count = count_result[0][0] if count_result else 0
-                logger.info(f"Found {count} records for CID {cid}")
-                
-                if count == 0:
-                    # Let's see what CIDs actually exist
-                    existing_cids_result = session.sql("SELECT CID FROM SLSP_DEMO LIMIT 10").collect()
-                    existing_cids = [row[0] for row in existing_cids_result]
-                    logger.info(f"Sample existing CIDs: {existing_cids}")
-                    return None
-                
-                # Now get the actual data
-                result = session.sql("SELECT DATA, LAST_UPDATED, PHASE FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                logger.info(f"Query returned row: {len(result) > 0}")
-                
-                if result:
-                    row = result[0]
-                    return {
-                        'raw_data': row[0],  # The raw JSON string
-                        'last_updated': row[1],
-                        'phase': row[2],
-                        'data_length': len(row[0]) if row[0] else 0
-                    }
-                return None
-        
-        try:
-            return self.execute_with_retry(_get_raw_operation)
-        except Exception as e:
-            logger.error(f"Failed to get raw data for CID {cid}: {str(e)}")
-            return None
 
-    def get_cid_dataframe(self, cid: str) -> Optional[pd.DataFrame]:
-        """Get all columns for a given CID and return as pandas DataFrame"""
-        def _get_dataframe_operation():
-            with self.get_session_context() as session:
-                # Get all columns from the table using Snowpark DataFrame
-                snowpark_df = session.table("SLSP_DEMO").filter(f"CID = '{cid}'")
-                
-                # Convert to pandas DataFrame
-                pandas_df = snowpark_df.to_pandas()
-                
-                return pandas_df if not pandas_df.empty else None
-        
-        try:
-            return self.execute_with_retry(_get_dataframe_operation)
-        except Exception as e:
-            logger.error(f"Failed to get DataFrame for CID {cid}: {str(e)}")
-            return None
-
-    def load_form_data(self, cid: str) -> Optional[Dict[str, Any]]:
-        """Load form data for given CID"""
-        def _load_operation():
-            with self.get_session_context() as session:
-                logger.info(f"load_form_data: Searching for CID '{cid}'")
-                
-                # Debug: Check if record exists
-                count_result = session.sql("SELECT COUNT(*) FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                count = count_result[0][0] if count_result else 0
-                logger.info(f"load_form_data: Found {count} records for CID {cid}")
-                
-                result = session.sql("SELECT DATA, LAST_UPDATED, PHASE FROM SLSP_DEMO WHERE CID = :cid", params={"cid": cid}).collect()
-                logger.info(f"load_form_data: Query returned row: {len(result) > 0}")
-                
-                if result and result[0][0]:
-                    row = result[0]
-                    raw_data = row[0]
-                    logger.info(f"Raw data loaded for CID {cid}, length: {len(raw_data)}")
-                    
-                    # Process the JSON data
-                    data = self.process_json_data(raw_data)
-                    if data is not None:
-                        # Add metadata to the data if they exist
-                        if row[1] is not None:  # LAST_UPDATED
-                            data['_last_updated'] = str(row[1])
-                        if row[2] is not None:  # PHASE
-                            data['_phase'] = row[2]
-                        return data
-                    else:
-                        logger.error(f"Failed to process JSON data for CID {cid}")
-                        return None
-                return None
-        
-        try:
-            return self.execute_with_retry(_load_operation)
-        except Exception as e:
-            logger.error(f"Failed to load form data for CID {cid}: {str(e)}")
-            return None
-    
-    
-    
-    def initialize_table(self) -> bool:
-        """Initialize the SLSP_DEMO table if it doesn't exist"""
-        def _init_operation():
-            with self.get_session_context() as session:
-                # Check if table exists
-                result = session.sql("""
-                    SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-                    WHERE TABLE_NAME = 'SLSP_DEMO' AND TABLE_SCHEMA = CURRENT_SCHEMA()
-                """).collect()
-                
-                if result[0][0] == 0:
-                    # Create table
-                    session.sql("""
-                        CREATE TABLE SLSP_DEMO (
-                            CID VARCHAR(16777216) PRIMARY KEY,
-                            DATA VARCHAR(16777216),
-                            LAST_UPDATED TIMESTAMP_LTZ(9) DEFAULT CURRENT_TIMESTAMP(),
-                            CREATED_AT TIMESTAMP_LTZ(9) DEFAULT CURRENT_TIMESTAMP(),
-                            PHASE NUMBER(38,0)
-                        )
-                    """).collect()
-                    logger.info("SLSP_DEMO table created successfully")
-                else:
-                    # Add missing columns if they don't exist
-                    try:
-                        session.sql("ALTER TABLE SLSP_DEMO ADD COLUMN IF NOT EXISTS CREATED_AT TIMESTAMP_LTZ(9) DEFAULT CURRENT_TIMESTAMP()").collect()
-                        session.sql("ALTER TABLE SLSP_DEMO ADD COLUMN IF NOT EXISTS LAST_UPDATED TIMESTAMP_LTZ(9) DEFAULT CURRENT_TIMESTAMP()").collect()
-                        session.sql("ALTER TABLE SLSP_DEMO ADD COLUMN IF NOT EXISTS PHASE NUMBER(38,0)").collect()
-                    except Exception:
-                        pass  # Columns might already exist
-                
-                return True
-        
-        try:
-            return self.execute_with_retry(_init_operation)
-        except Exception as e:
-            logger.error(f"Failed to initialize table: {str(e)}")
-            return False
-    
+def write_data_snowflake(df: pd.DataFrame, table_name: str, auto_create_table: bool = False, overwrite: bool = False) -> None:
+    try:
+        # Get Snowflake session
+        session = get_snowflake_session()
+        session.write_pandas(df=df, table_name=table_name, auto_create_table=auto_create_table, overwrite=overwrite).collect()
+        #client.create_event(message='Streamlit App Snowflake Write Table', event_type='keboola_data_app_snowflake_write_table', event_data=f'table_id: {table_name}')
+    except Exception as e:
+        st.error(f"Failed to execute a query: {e}")
 
 
-# Global database manager instance
-@st.cache_resource
-def get_db_manager():
-    """Get singleton database manager instance"""
-    return SnowflakeManager()
+def save_changed_rows_snowflake(df_original, changed_rows, debug, progress):
+    """Save only the changed rows with new values to a CSV file or Snowflake."""
+     
+    # Step 1: Standardize Primary Key Column Data Types
+    pk_columns = ['CID']
+    for col in pk_columns:
+        df_original[col] = df_original[col].astype(str if col == 'CID' else 'int32')
+        changed_rows[col] = changed_rows[col].astype(str if col == 'CID' else 'int32')
+    
+    # Log who and when is changing the values
+    #changed_rows['HIST_DATA_MODIFIED_BY'] = st.session_state['user_email']
+    #changed_rows['HIST_DATA_MODIFIED_WHEN'] = datetime.now()
+    
+    # Step 2: Ensure Timestamp Columns Are Converted to String Format
+    timestamp_columns = ['LAST_UPDATED', 'CREATED_AT']
+    default_timestamp = "1970-01-01 00:00:00.000"
+    
+    for timestamp_col in timestamp_columns:
+        if timestamp_col in changed_rows.columns:
+            changed_rows[timestamp_col] = changed_rows[timestamp_col].fillna(default_timestamp).astype(str)
+        if timestamp_col in df_original.columns:
+            df_original[timestamp_col] = df_original[timestamp_col].fillna(default_timestamp).astype(str)
+
+    # Step 3: Merge DataFrames and Fill NaNs
+    # Merge changed_rows with df_original on PK columns
+    merged_df = pd.merge(
+        changed_rows,
+        df_original,
+        on=pk_columns,
+        how='left',
+        suffixes=('', '_orig')
+    )
+    #'VYKON_SYSTEM', 'HODNOTY_SYSTEM'
+    columns_to_update = ['DATA', 'PHASE', 'LAST_UPDATED', 'CREATED_AT', 'PHASE', 
+                         ]
+
+    # For each column, fill NaNs in changed_rows with values from df_original
+    for col in columns_to_update:
+        if col in merged_df.columns and col + '_orig' in merged_df.columns:
+            merged_df[col] = merged_df[col].fillna(merged_df[col + '_orig'])
+    
+    # Drop the original columns with '_orig' suffix
+    cols_to_drop = [col for col in merged_df.columns if col.endswith('_orig')]
+    merged_df.drop(columns=cols_to_drop, inplace=True)
+
+    # Now, merged_df contains the updated rows with NaNs filled
+    df_updated = merged_df.copy()
+
+    # Step 4: Ensure Numeric Columns Are Properly Formatted
+    for col in ['PHASE']: #'VYKON_SYSTEM', 'HODNOTY_SYSTEM'
+        if col in df_updated.columns:
+            df_updated[col] = pd.to_numeric(df_updated[col], errors='coerce').fillna(0).astype(int)
+
+    # Step 5: Apply Conditional Logic to Update LOCKED_TIMESTAMP
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Format with milliseconds
+    df_updated.loc[df_updated['PHASE'] == 1, 
+                   'LAST_UPDATED'] = current_time
+    
+    # Step 6: Align with Expected Schema and Convert Datetimes to Strings
+    file_path = os.path.join(os.path.dirname(__file__), './static/expected_schema.json')
+    with open(file_path, 'r', encoding='utf-8') as file: 
+        expected_schema = json.load(file)  
+    
+    for col, dtype in expected_schema.items():
+        if col not in df_updated.columns:
+            df_updated[col] = default_timestamp if 'datetime' in dtype else ('' if dtype == 'str' else 0)
+        else:
+            if dtype == 'str':
+                df_updated[col] = df_updated[col].astype(str)
+            elif 'int' in dtype:
+                df_updated[col] = pd.to_numeric(df_updated[col], errors='coerce').fillna(0).astype('int')
+            elif 'datetime' in dtype:
+                df_updated[col] = pd.to_datetime(df_updated[col], errors='coerce').fillna(default_timestamp).astype(str)
+
+    df_updated = df_updated.drop(columns=['PHASE'])
+    
+    # Step 7: Save Data
+    if debug:
+        file_path = os.path.join(os.path.dirname(__file__), 'data', 'in', 'tables', 'anonymized_data.csv')
+        df_anonymized = pd.read_csv(file_path)
+        df_anonymized.set_index(pk_columns, inplace=True)
+        df_updated.set_index(pk_columns, inplace=True)
+        df_anonymized.update(df_updated)
+        df_anonymized.reset_index(inplace=True)
+        df_anonymized.to_csv(file_path, index=False)
+    else:
+        table_name = st.secrets["WORKSPACE_SOURCE_TABLE_ID"]
+        temp_table_name = f"TEMP_STAGING_{st.session_state['user_email'].replace('@', '_').replace('.', '_')}_{uuid.uuid4().hex}"
+        
+        create_temp_table_sql = f"CREATE OR REPLACE TRANSIENT TABLE \"{temp_table_name}\" (\n"
+        columns = [f'"{col}" {map_json_to_snowflake_type(dtype)}' for col, dtype in expected_schema.items()]
+        create_temp_table_sql += ",\n".join(columns) + "\n);"
+        
+        progress.progress(50, text="**Probíhá zápis změn...**")
+        execute_query_snowflake(create_temp_table_sql)
+        #st.write(df_updated)
+        write_data_snowflake(df_updated, temp_table_name, auto_create_table=False, overwrite=False)
+
+        update_sql = f"""
+            UPDATE "{table_name}" AS target
+            SET { ', '.join([f'target."{col}" = source."{col}"' for col in columns_to_update]) }
+            FROM "{temp_table_name}" AS source
+            WHERE { ' AND '.join([f'target."{col}" = source."{col}"' for col in pk_columns]) };
+        """
+        drop_temp_table_sql = f'DROP TABLE IF EXISTS "{temp_table_name}";'
+        progress.progress(60, text="**Ukládám...**")
+        update_result = execute_query_snowflake(update_sql)
+        #st.write(update_result)
+#        execute_query_snowflake(drop_temp_table_sql, client=client)
+        if update_result and len(update_result) > 0:
+            # The update completed successfully
+            pass
+        
+    # Clear tracked changes
+    #st.session_state['changed_rows'] = pd.DataFrame()
+    #st.session_state['unsaved_warning_displayed'] = False
+    
+    read_data_snowflake(st.secrets["WORKSPACE_SOURCE_TABLE_ID"])
+
+    pk_columns = ['CID']
+    st.session_state['df_original'] = st.session_state['df'].set_index(pk_columns).copy()
+    st.session_state['df_last_saved'] = st.session_state['df_original'].copy()
+
+    st.session_state['grid_refresh_timestamp'] = datetime.now().timestamp()
+    
+    st.success("Změny uloženy, aplikace bude obnovena.")
+    #st.rerun()
+    return df_updated
+
+
