@@ -56,9 +56,10 @@ def initialize_connection_once():
         return st.session_state.db_manager, True, "✅ Using cached database connection"
     
     try:
+        # Get cached database manager instance
         db_manager = get_db_manager()
         
-        # Test connection
+        # Test the connection by getting a session
         session = db_manager.get_session()
         if not session:
             return None, False, "❌ Failed to connect to Snowflake workspace"
@@ -77,51 +78,34 @@ def initialize_connection_once():
     except Exception as e:
         return None, False, f"❌ Connection error: {str(e)}"
 
-def read_table_data(db_manager):
+
+def get_db_manager_from_session():
     """
-    Read all data from SLSP_DEMO table using Snowpark and pandas
-    Returns: (success, data_list, message)
+    Get database manager from session state, initialize if needed
+    Returns: (db_manager, success, message)
     """
-    try:
-        # Use Snowpark to get data and convert to pandas DataFrame
-        with db_manager.get_session_context() as session:
-            snowpark_df = session.table("SLSP_DEMO").select("CID", "DATA", "PHASE", "LAST_UPDATED").order_by("CID")
-            pandas_df = snowpark_df.to_pandas()
-            rows = pandas_df.values.tolist()
-            
-            if rows:
-                # Convert to pandas DataFrame
-                df_snowflake = pd.DataFrame(rows, columns=['CID', 'DATA', 'PHASE', 'LAST_UPDATED'])
-                
-                # Convert DataFrame to list of dictionaries
-                data_list = []
-                for _, row in df_snowflake.iterrows():
-                    try:
-                        # Parse JSON data
-                        json_data = json.loads(row['DATA']) if row['DATA'] else {}
-                        data_list.append({
-                            'CID': row['CID'],
-                            'DATA': json_data,
-                            'DATA_RAW': row['DATA'],
-                            'PHASE': row['PHASE'],
-                            'LAST_UPDATED': row['LAST_UPDATED']
-                        })
-                    except json.JSONDecodeError:
-                        # Handle invalid JSON
-                        data_list.append({
-                            'CID': row['CID'],
-                            'DATA': {},
-                            'DATA_RAW': row['DATA'],
-                            'PHASE': row['PHASE'],
-                            'LAST_UPDATED': row['LAST_UPDATED']
-                        })
-                
-                return True, data_list, f"📊 Found {len(data_list)} records in SLSP_DEMO table"
-            else:
-                return True, [], "📝 SLSP_DEMO table is empty"
-                
-    except Exception as e:
-        return False, [], f"❌ Error reading table: {str(e)}"
+    if "db_manager" in st.session_state and "connection_initialized" in st.session_state:
+        return st.session_state.db_manager, True, "✅ Using cached database connection"
+    
+    # Initialize connection if not already done
+    db_manager, success, message = initialize_connection_once()
+    return db_manager, success, message
+
+
+def get_snowflake_session():
+    """
+    Get Snowflake session directly from session state
+    Returns: (session, success, message)
+    """
+    db_manager, success, message = get_db_manager_from_session()
+    if db_manager:
+        session = db_manager.get_session_for_direct_use()
+        if session:
+            return session, True, "✅ Session available"
+        else:
+            return None, False, "❌ Failed to get session"
+    else:
+        return None, False, message
 
 
 def auto_save_data(db_manager, cid, data_to_save):
@@ -522,11 +506,8 @@ def main():
     
     # Handle CID lookup
     if lookup_clicked and cid.strip():
-        # Initialize database connection only when user clicks "Vyhľadať"
-        if "db_manager" not in st.session_state:
-            db_manager, conn_status, conn_message = initialize_connection_once()
-        else:
-            db_manager, conn_status, conn_message = initialize_connection_once()
+        # Get database manager from session state
+        db_manager, conn_status, conn_message = get_db_manager_from_session()
         
         # Check if connection was successful
         if not db_manager:
@@ -595,16 +576,16 @@ def main():
             with col1:
                 if st.button("🔧 Fix This CID", type="primary"):
                     #with st.spinner("Fixing corrupted data..."):
-                    db_manager = st.session_state.get("db_manager")
+                    db_manager, success, message = get_db_manager_from_session()
                     if db_manager:
-                        success = db_manager.fix_corrupted_record(cid.strip())
-                        if success:
+                        fix_success = db_manager.fix_corrupted_record(cid.strip())
+                        if fix_success:
                             st.success("✅ CID fixed successfully! Please refresh the page.")
                             st.rerun()
                         else:
                             st.error("❌ Failed to fix CID. Please contact support.")
                     else:
-                        st.error("❌ Database not connected. Please try searching again.")
+                        st.error(f"❌ Database not connected: {message}")
             
             with col2:
                 if st.button("🔄 Refresh Page"):
@@ -2680,11 +2661,11 @@ def main():
        #st.write(data_to_save)
         if has_data:
             # Auto-save functionality
-            db_manager = st.session_state.get("db_manager")
+            db_manager, success, message = get_db_manager_from_session()
             if db_manager:
                 save_status, save_message = auto_save_data(db_manager, cid, data_to_save)
             else:
-                save_status, save_message = "error", "Database not connected"
+                save_status, save_message = "error", f"Database not connected: {message}"
 
             # Show auto-save status
             st.markdown("---")

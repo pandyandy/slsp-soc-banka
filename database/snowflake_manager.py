@@ -22,11 +22,9 @@ class SnowflakeManager:
     
     def __init__(self):
         self.session = None
-        self.last_activity = None
-        self.connection_timeout = 1800  # 30 minutes
         self.max_retries = 3
         
-    #@st.cache_resource
+    @st.cache_resource
     def _create_session(_self):
         """Create a new Snowpark session with caching"""
         try:
@@ -47,34 +45,14 @@ class SnowflakeManager:
             return None
     
     def get_session(self) -> Optional[Session]:
-        """Get active session or create new one"""
-        current_time = time.time()
-        
-        # Check if session exists and is not expired
-        if (self.session and 
-            self.last_activity and 
-            (current_time - self.last_activity) < self.connection_timeout):
-            
-            # Quick session test (lightweight)
-            if self._is_session_alive():
-                self.last_activity = current_time
-                return self.session
-        
-        # Create new session
-        self.session = self._create_session()
-        self.last_activity = current_time if self.session else None
+        """Create session once and reuse without timeout or liveness checks"""
+        if self.session is None:
+            self.session = self._create_session()
         return self.session
     
-    def _is_session_alive(self) -> bool:
-        """Lightweight session test"""
-        try:
-            if not self.session:
-                return False
-            # Use a simple query to test session
-            self.session.sql("SELECT CURRENT_TIMESTAMP()").collect()
-            return True
-        except Exception:
-            return False
+    def get_session_for_direct_use(self) -> Optional[Session]:
+        """Get session for direct SQL operations (advanced use cases)"""
+        return self.get_session()
     
     @contextmanager
     def get_session_context(self):
@@ -474,7 +452,7 @@ class SnowflakeManager:
 
 
 # Global database manager instance
-#@st.cache_resource
+@st.cache_resource
 def get_db_manager():
     """Get singleton database manager instance"""
     return SnowflakeManager()
